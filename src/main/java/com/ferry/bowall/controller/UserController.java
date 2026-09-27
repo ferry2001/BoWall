@@ -6,13 +6,22 @@ import com.ferry.bowall.common.R;
 import com.ferry.bowall.entity.Fans;
 import com.ferry.bowall.entity.User;
 import com.ferry.bowall.service.FansService;
+import com.ferry.bowall.service.MessageService;
+import com.ferry.bowall.service.NotificationService;
 import com.ferry.bowall.service.UserService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.bind.annotation.*;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpSession;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
 import java.time.LocalDateTime;
 import java.util.*;
 
@@ -21,8 +30,18 @@ import java.util.*;
 @RestController
 @Slf4j
 public class UserController {
+    private static final Set<String> IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp");
+
+    @Value("${app.upload-dir:${user.dir}/uploads}")
+    private String uploadDir;
+    @Autowired
+    private NotificationService notificationService;
+
     @Autowired
     private UserService userService;
+
+    @Autowired
+    private MessageService messageService;
 
     @Autowired
     private FansService fansService;
@@ -33,19 +52,22 @@ public class UserController {
     @GetMapping("/getUser")
     public R<User> getUser(String account) {
         User user = userService.getUser(account);
-        if (user!=null) {
+        if (user != null) {
             return R.success(user);
-        }else {
+        } else {
             return R.error("用户不存在");
         }
 
     }
 
     @PostMapping("/add")
-    public R<String> add(String account, String fansAccount){
+    public R<String> add(@RequestBody Map map) {
+        String account = map.get("account").toString();
+        String fansAccount = map.get("fansAccount").toString();
         Fans isfan = fansService.isfan(account, fansAccount);
         if (isfan != null) {
-            return R.success("已经关注");
+            userService.deleteFanAndFollowUser(account, fansAccount);
+            return R.success("取消关注");
         } else {
             userService.addFanAndFollowUser(account, fansAccount);
             return R.success("关注成功");
@@ -54,7 +76,7 @@ public class UserController {
     }
 
     @PostMapping("/login")
-    public R<User> login(@RequestBody Map map, HttpSession session){
+    public R<User> login(@RequestBody Map map, HttpSession session) {
         log.info(map.toString());
 
         //获取手机号
@@ -69,24 +91,25 @@ public class UserController {
        /* //从 Redis 中获取缓存的验证码
         Object codeInSession = redisTemplate.opsForValue().get(phone);*/
 
-        String codeInSession = "1234";
+        String codeInSession = map.get("randomNum").toString();
 
         //进行验证码的比对（页面提交的验证码和Session中保存的验证码比对）
-        if(codeInSession != null && codeInSession.equals(code)){
+        if (codeInSession != null && codeInSession.equals(code)) {
             //如果能够比对成功，说明登录成功
 
             LambdaQueryWrapper<User> queryWrapper = new LambdaQueryWrapper<>();
-            queryWrapper.eq(User::getPhone,phone);
+            queryWrapper.eq(User::getPhone, phone);
 
             User user = userService.getOne(queryWrapper);
-            if(user == null){
+            if (user == null) {
                 //判断当前手机号对应的用户是否为新用户，如果是新用户就自动完成注册
                 user = new User();
+                user.setAccount(UUID.randomUUID().toString());
                 user.setPhone(phone);
                 user.setStatus(1);
                 userService.save(user);
             }
-            session.setAttribute("user",user.getAccount());
+            session.setAttribute("user", user.getAccount());
 
 //            //如果用户登录成功，删除 Redis 中缓存的验证码
 //            redisTemplate.delete(phone);
@@ -101,6 +124,35 @@ public class UserController {
         user.setUpdateTime(LocalDateTime.now());
         userService.updateUser(user);
         return R.success("用户信息修改成功");
+    }
+
+    @PostMapping(value = "/avatar", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public R<User> uploadAvatar(@RequestParam String account, @RequestParam("avatar") MultipartFile avatar) throws IOException {
+        if (avatar.isEmpty()) {
+            return R.error("请选择头像图片");
+        }
+        User user = userService.getUser(account);
+        if (user == null) {
+            return R.error("用户不存在");
+        }
+
+        String originalName = Optional.ofNullable(avatar.getOriginalFilename()).orElse("");
+        int extensionStart = originalName.lastIndexOf('.') + 1;
+        String extension = extensionStart > 0 ? originalName.substring(extensionStart).toLowerCase(Locale.ROOT) : "";
+        if (!IMAGE_EXTENSIONS.contains(extension)) {
+            return R.error("头像仅支持 JPG、PNG、GIF 或 WebP 图片");
+        }
+
+        Path directory = Path.of(uploadDir).toAbsolutePath();
+        Files.createDirectories(directory);
+        String fileName = UUID.randomUUID() + "." + extension;
+        try (var input = avatar.getInputStream()) {
+            Files.copy(input, directory.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        user.setAvatar("/images/" + fileName);
+        userService.updateUser(user);
+        return R.success(user);
     }
 
 
@@ -121,12 +173,12 @@ public class UserController {
 
             // Generate the grouping key
             String groupingKey = "";
-                //if chinese
+            //if chinese
             if (!py.isEmpty()) {
-                groupingKey = py.charAt(0)+"";
+                groupingKey = py.charAt(0) + "";
                 //if english
-            }else {
-                groupingKey = firstName.charAt(0)+"";
+            } else {
+                groupingKey = firstName.charAt(0) + "";
             }
             //uppercase letter
             groupingKey = groupingKey.toUpperCase();
@@ -142,8 +194,11 @@ public class UserController {
 
         for (List<User> users : groupedObjects.values()) {
             Collections.sort(users, new Comparator<User>() {
-                public int compare(User u1, User u2) {return -(u1.getName().compareTo(u2.getName()));
-                }});}
+                public int compare(User u1, User u2) {
+                    return -(u1.getName().compareTo(u2.getName()));
+                }
+            });
+        }
 
         //Sort map
         TreeMap<String, List<User>> treeMap = new TreeMap<>(groupedObjects);

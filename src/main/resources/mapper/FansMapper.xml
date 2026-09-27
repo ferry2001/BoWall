@@ -7,6 +7,6 @@
     </insert>
 
     <select id="isfan" resultType="com.ferry.bowall.entity.Fans">
-        SELECT * from fans where (fans.account = #{account} and fans.fans_account = #{fansAccount})
+        SELECT * from fans where (account = #{account} and fans_account = #{fansAccount})
     </select>
 </mapper>

@@ -17,4 +17,11 @@
         SELECT * FROM user where account in (SELECT followers_account FROM followers where account = #{account})
                              and account in (SELECT account FROM followers where followers_account = #{account})
     </select>
+    <select id="getUsers" resultType="com.ferry.bowall.entity.User">
+        SELECT * FROM User
+        WHERE user.account IN
+        <foreach item="account" collection="accounts" open="(" separator="," close=")">
+            #{accounts}
+        </foreach>
+    </select>
 </mapper>

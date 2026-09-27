@@ -7,6 +7,7 @@ import com.ferry.bowall.entity.Posts;
 import com.ferry.bowall.entity.User;
 import com.ferry.bowall.service.FollowersService;
 import com.ferry.bowall.service.UserService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -18,6 +19,7 @@ import java.util.List;
 
 @RestController
 @RequestMapping("/followers")
+@Slf4j
 public class FollowersController {
     @Autowired
     private FollowersService followersService;

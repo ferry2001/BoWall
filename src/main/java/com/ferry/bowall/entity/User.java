@@ -1,10 +1,7 @@
 package com.ferry.bowall.entity;
 
 import lombok.Data;
-import javax.persistence.ManyToMany;
 import java.time.LocalDateTime;
-import java.util.HashSet;
-import java.util.Set;
 
 @Data
 public class User {

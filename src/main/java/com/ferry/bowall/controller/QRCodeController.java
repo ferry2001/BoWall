@@ -1,6 +1,7 @@
 package com.ferry.bowall.controller;
 import com.ferry.bowall.common.QRCodeGenerator;
 import com.google.zxing.WriterException;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -16,6 +17,7 @@ import java.io.IOException;
 
 @RestController
 @RequestMapping("/qrcode")
+@Slf4j
 public class QRCodeController {
     @Autowired
     private final QRCodeGenerator qrCodeGenerator;
