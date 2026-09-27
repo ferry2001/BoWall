@@ -1,7 +1,7 @@
 package com.ferry.bowall.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
 import com.ferry.bowall.entity.Fans;
 import com.ferry.bowall.entity.Followers;
 import com.ferry.bowall.entity.User;

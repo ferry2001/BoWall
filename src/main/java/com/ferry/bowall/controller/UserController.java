@@ -11,10 +11,17 @@ import com.ferry.bowall.service.NotificationService;
 import com.ferry.bowall.service.UserService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.http.MediaType;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.bind.annotation.*;
 
-import javax.servlet.http.HttpServletRequest;
-import javax.servlet.http.HttpSession;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
 import java.time.LocalDateTime;
 import java.util.*;
 
@@ -23,6 +30,10 @@ import java.util.*;
 @RestController
 @Slf4j
 public class UserController {
+    private static final Set<String> IMAGE_EXTENSIONS = Set.of("jpg", "jpeg", "png", "gif", "webp");
+
+    @Value("${app.upload-dir:${user.dir}/uploads}")
+    private String uploadDir;
     @Autowired
     private NotificationService notificationService;
 
@@ -93,6 +104,7 @@ public class UserController {
             if (user == null) {
                 //判断当前手机号对应的用户是否为新用户，如果是新用户就自动完成注册
                 user = new User();
+                user.setAccount(UUID.randomUUID().toString());
                 user.setPhone(phone);
                 user.setStatus(1);
                 userService.save(user);
@@ -112,6 +124,35 @@ public class UserController {
         user.setUpdateTime(LocalDateTime.now());
         userService.updateUser(user);
         return R.success("用户信息修改成功");
+    }
+
+    @PostMapping(value = "/avatar", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public R<User> uploadAvatar(@RequestParam String account, @RequestParam("avatar") MultipartFile avatar) throws IOException {
+        if (avatar.isEmpty()) {
+            return R.error("请选择头像图片");
+        }
+        User user = userService.getUser(account);
+        if (user == null) {
+            return R.error("用户不存在");
+        }
+
+        String originalName = Optional.ofNullable(avatar.getOriginalFilename()).orElse("");
+        int extensionStart = originalName.lastIndexOf('.') + 1;
+        String extension = extensionStart > 0 ? originalName.substring(extensionStart).toLowerCase(Locale.ROOT) : "";
+        if (!IMAGE_EXTENSIONS.contains(extension)) {
+            return R.error("头像仅支持 JPG、PNG、GIF 或 WebP 图片");
+        }
+
+        Path directory = Path.of(uploadDir).toAbsolutePath();
+        Files.createDirectories(directory);
+        String fileName = UUID.randomUUID() + "." + extension;
+        try (var input = avatar.getInputStream()) {
+            Files.copy(input, directory.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
+        }
+
+        user.setAvatar("/images/" + fileName);
+        userService.updateUser(user);
+        return R.success(user);
     }
 
 

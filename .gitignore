@@ -38,4 +38,11 @@ third-party/nacos/work/
 file/
 #bowall#
 
+# Local configuration and secrets
+src/main/resources/application-local.yml
+.env
+.env.*
+.m2/
+.mvn/settings.xml
+
 /src/main/resources/images/

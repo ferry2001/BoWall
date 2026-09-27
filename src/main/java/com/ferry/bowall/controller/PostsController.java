@@ -2,17 +2,12 @@ package com.ferry.bowall.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ferry.bowall.common.R;
 import com.ferry.bowall.dto.CommentsDto;
 import com.ferry.bowall.dto.PostsDto;
-import com.ferry.bowall.entity.Comments;
-import com.ferry.bowall.entity.Image;
-import com.ferry.bowall.entity.Posts;
-import com.ferry.bowall.entity.User;
-import com.ferry.bowall.service.CommentsService;
-import com.ferry.bowall.service.ImageService;
-import com.ferry.bowall.service.PostsService;
-import com.ferry.bowall.service.UserService;
+import com.ferry.bowall.entity.*;
+import com.ferry.bowall.service.*;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
@@ -40,6 +35,9 @@ public class PostsController {
 
     @Autowired
     private CommentsService commentsService;
+
+    @Autowired
+    private LikeService likeService;
 
     @GetMapping("getPostsById")
     public R<PostsDto> getPostsById(@RequestParam String postId) {
@@ -86,10 +84,10 @@ public class PostsController {
     }
 
     @GetMapping("/getAllPosts")
-    public R<List<PostsDto>> getAllPosts(@RequestParam int page, @RequestParam int size) {
+    public R<List<PostsDto>> getAllPosts(@RequestParam int page, @RequestParam int size, @RequestParam String account) {
         List<PostsDto> postsDtos = new ArrayList<>();
         LambdaQueryWrapper<Posts> postsLambdaQueryWrapper = new LambdaQueryWrapper<>();
-        postsLambdaQueryWrapper.orderByAsc(Posts::getUpdateDate);
+        postsLambdaQueryWrapper.orderByDesc(Posts::getUpdateDate);
 //        List<Posts> posts = postsService.list(postsLambdaQueryWrapper);
         Page<Posts> postsPage = new Page<>(page, size);
         postsPage = postsService.page(postsPage, postsLambdaQueryWrapper);
@@ -123,6 +121,10 @@ public class PostsController {
                 commentsDtos.add(commentsDto);
             }
 
+            LambdaQueryWrapper<Likes> likesLambdaQueryWrapper = new LambdaQueryWrapper<Likes>();
+            likesLambdaQueryWrapper.eq(Likes::getAccount,account)
+                    .eq(Likes::getPostId,post.getId());
+            Likes likes = likeService.getOne(likesLambdaQueryWrapper);
             PostsDto postsDto = new PostsDto();
             postsDto.setUser(user);
             postsDto.setAccount(post.getAccount());
@@ -131,6 +133,11 @@ public class PostsController {
             postsDto.setUpdateDate(post.getUpdateDate());
             postsDto.setImages(images);
             postsDto.setComments(commentsDtos);
+            if (likes == null) {
+                postsDto.setIsLike(0);
+            }else {
+                postsDto.setIsLike(1);
+            }
             postsDtos.add(postsDto);
         }
 
@@ -152,6 +159,42 @@ public class PostsController {
 
         postsService.save(posts);
         return R.success(uuid.toString());
+    }
+
+    @PostMapping("/forward")
+    public R<String> forward(@RequestBody Map map) {
+        String account = map.get("account").toString();
+        String postId = map.get("postId").toString();
+        List list = (List) map.get("images");
+
+        UUID uuid = UUID.randomUUID();
+        Posts post = postsService.getById(postId);
+        Posts posts = new Posts();
+        posts.setAccount(account);
+        posts.setId(uuid.toString());
+        posts.setText("转发来自用户账号为@"+post.getAccount()+"的动态:"+post.getText());
+        posts.setUpdateDate(LocalDateTime.now());
+        postsService.save(posts);
+        for (Object o : list) {
+            Map mapImage = (Map) o;
+            System.out.println(mapImage.get("url").toString());
+            String url = mapImage.get("url").toString();
+            String width = mapImage.get("width").toString();
+            String height = mapImage.get("height").toString();
+
+            Image image = new Image();
+            image.setAccount(account);
+            image.setUrl(url);
+            image.setPostsId(uuid.toString());
+            image.setWidth(width);
+            image.setHeight(height);
+            image.setUpdateDate(LocalDateTime.now());
+            imageService.save(image);
+
+        }
+
+
+        return null;
     }
 
     @GetMapping("/getPosts")
@@ -242,4 +285,34 @@ public class PostsController {
             return R.success("0");
         }
     }
+
+    @DeleteMapping("/delete/{postId}")
+    public R<String> deletePost(@PathVariable String postId) {
+        LambdaQueryWrapper<Posts> postsLambdaQueryWrapper = new LambdaQueryWrapper<>();
+        postsLambdaQueryWrapper.eq(Posts::getId, postId);
+
+        //检查帖子是否存在
+        Posts post = postsService.getOne(postsLambdaQueryWrapper);
+        if (post == null) {
+            return R.error("帖子不存在或已被删除");
+        }
+
+        // 删除帖子
+        boolean remove = postsService.remove(postsLambdaQueryWrapper);
+        if (remove) {
+            // 还需要删除关联的评论、图片等内容
+            LambdaQueryWrapper<Comments> commentsLambdaQueryWrapper = new LambdaQueryWrapper<>();
+            commentsLambdaQueryWrapper.eq(Comments::getPostsId, postId);
+            commentsService.remove(commentsLambdaQueryWrapper);
+
+            LambdaQueryWrapper<Image> imageLambdaQueryWrapper = new LambdaQueryWrapper<>();
+            imageLambdaQueryWrapper.eq(Image::getPostsId,postId);
+            imageService.remove(imageLambdaQueryWrapper);
+            // 请根据您的数据模型和业务逻辑来删除相关内容
+            return R.success("帖子删除成功");
+        } else {
+            return R.error("帖子删除失败");
+        }
+    }
+
 }

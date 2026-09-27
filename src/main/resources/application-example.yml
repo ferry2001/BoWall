@@ -1,0 +1,12 @@
+# Copy the required values to environment variables before starting the service.
+# PowerShell example:
+# $env:BOWALL_DB_URL = 'jdbc:mysql://127.0.0.1:3306/bowall?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true'
+# $env:BOWALL_DB_USERNAME = 'root'
+# $env:BOWALL_DB_PASSWORD = 'replace-with-your-password'
+# $env:BOWALL_REDIS_HOST = '127.0.0.1'
+# $env:BOWALL_REDIS_PORT = '6379'
+# $env:BOWALL_REDIS_PASSWORD = 'replace-with-your-password'
+# $env:BOWALL_REDIS_DATABASE = '0'
+
+server:
+  port: 8080

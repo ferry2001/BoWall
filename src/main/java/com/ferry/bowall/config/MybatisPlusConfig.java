@@ -3,8 +3,8 @@ package com.ferry.bowall.config;
 
 import com.baomidou.mybatisplus.annotation.DbType;
 import com.baomidou.mybatisplus.autoconfigure.MybatisPlusPropertiesCustomizer;
-import com.baomidou.mybatisplus.core.MybatisConfiguration;
 import com.baomidou.mybatisplus.core.handlers.MybatisEnumTypeHandler;
+import com.baomidou.mybatisplus.autoconfigure.MybatisPlusProperties.CoreConfiguration;
 import com.baomidou.mybatisplus.extension.plugins.MybatisPlusInterceptor;
 import com.baomidou.mybatisplus.extension.plugins.inner.PaginationInnerInterceptor;
 import org.apache.ibatis.annotations.Mapper;
@@ -44,7 +44,7 @@ public class MybatisPlusConfig{
     @Bean
     public MybatisPlusPropertiesCustomizer mybatisPlusPropertiesCustomizer() {
         return properties -> {
-            MybatisConfiguration configuration = new MybatisConfiguration();
+            CoreConfiguration configuration = new CoreConfiguration();
             configuration.setDefaultEnumTypeHandler(MybatisEnumTypeHandler.class); // 枚举处理类
             properties.setConfiguration(configuration);
         };

@@ -2,7 +2,7 @@ package com.ferry.bowall.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.baomidou.mybatisplus.spring.service.impl.ServiceImpl;
 import com.ferry.bowall.entity.Posts;
 import com.ferry.bowall.mapper.PostsMapper;
 import com.ferry.bowall.service.PostsService;

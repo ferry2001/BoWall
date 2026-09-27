@@ -1,29 +1,26 @@
 package com.ferry.bowall.config;
 
 import com.ferry.bowall.common.JacksonObjectMapper;
-import com.github.xiaoymin.knife4j.spring.annotations.EnableKnife4j;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.info.Info;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
-import org.springframework.web.servlet.config.annotation.WebMvcConfigurationSupport;
-import springfox.documentation.builders.ApiInfoBuilder;
-import springfox.documentation.builders.PathSelectors;
-import springfox.documentation.builders.RequestHandlerSelectors;
-import springfox.documentation.service.ApiInfo;
-import springfox.documentation.spi.DocumentationType;
-import springfox.documentation.spring.web.plugins.Docket;
-import springfox.documentation.swagger2.annotations.EnableSwagger2;
+import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.util.List;
+import java.nio.file.Path;
 
 @Slf4j
 @Configuration
-@EnableSwagger2
-@EnableKnife4j
-public class WebMvcConfig extends WebMvcConfigurationSupport {
+public class WebMvcConfig implements WebMvcConfigurer {
+
+    @Value("${app.upload-dir:${user.dir}/uploads}")
+    private String uploadDir;
 
 
     /**
@@ -31,10 +28,10 @@ public class WebMvcConfig extends WebMvcConfigurationSupport {
      * @param registry
      */
     @Override
-    protected void addResourceHandlers(ResourceHandlerRegistry registry) {
+    public void addResourceHandlers(ResourceHandlerRegistry registry) {
         log.info("开始进行静态资源映射...");
         registry.addResourceHandler("/images/**")
-                .addResourceLocations("file:/usr/local/demo/images/");
+                .addResourceLocations(Path.of(uploadDir).toAbsolutePath().toUri().toString());
     }
 
     /**
@@ -42,7 +39,8 @@ public class WebMvcConfig extends WebMvcConfigurationSupport {
      * @param converters
      */
     @Override
-    protected void extendMessageConverters(List<HttpMessageConverter<?>> converters) {
+    @SuppressWarnings("removal") // Spring Framework 7 still supports this Jackson 2 compatibility bridge.
+    public void extendMessageConverters(List<HttpMessageConverter<?>> converters) {
 
         log.info("扩展消息转换器...");
 
@@ -59,21 +57,10 @@ public class WebMvcConfig extends WebMvcConfigurationSupport {
     }
 
     @Bean
-    public Docket createRestApi() {
-        // 文档类型
-        return new Docket(DocumentationType.SWAGGER_2)
-                .apiInfo(apiInfo())
-                .select()
-                .apis(RequestHandlerSelectors.basePackage("com.ferry.reggie.controller"))
-                .paths(PathSelectors.any())
-                .build();
-    }
-
-    private ApiInfo apiInfo() {
-        return new ApiInfoBuilder()
+    public OpenAPI bowallOpenApi() {
+        return new OpenAPI().info(new Info()
                 .title("BoWall")
                 .version("1.0.0")
-                .description("BoWall interface doc")
-                .build();
+                .description("BoWall interface doc"));
     }
 }
