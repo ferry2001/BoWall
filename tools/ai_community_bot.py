@@ -4,25 +4,25 @@
 AI 社区模拟机器人（低成本版）
 
 思路：
-  1. 用极便宜的 API（DeepSeek / 智谱 GLM-4-Flash(免费) / 通义 / Kimi / 本地 Ollama）
-     批量生成"人设 + 发帖 + 评论"文本；
-  2. 不配置任何 key 时自动退化为本地模板，仍然可以把社区灌满数据（0 成本）；
+  1. 所有内容（人设、昵称、简介、帖子、评论）均由 LLM 实时生成，无本地兜底模板；
+     默认接 DeepSeek，也可换成任意 OpenAI 兼容服务（智谱 / 通义 / Kimi / 本地 Ollama）。
+  2. 未配置 BOT_LLM_KEY 时脚本直接报错退出，不会静默灌入假数据。
   3. Codex / GPT 只用来做编排、抽查、调 prompt，不再逐条消耗额度。
 
 依赖：仅 Python 标准库，无需 pip install。
 
 用法示例：
-  # 先看计划，不发任何请求
-  python tools/ai_community_bot.py --dry-run --agents 5 --posts-per-agent 2
-
-  # 正式灌入本地后端（0 成本模板模式）
+  # 必须配置 LLM key（DeepSeek 为例）
+  export BOT_LLM_KEY=sk-xxxx                          # 必填
   export BOWALL_BASE=http://localhost:8080
   python tools/ai_community_bot.py --agents 5 --posts-per-agent 2 --comments-per-post 3
 
-  # 接便宜 LLM 让内容更真实（OpenAI 兼容协议，换服务商只改环境变量）
-  export BOT_LLM_URL=https://api.deepseek.com/chat/completions
-  export BOT_LLM_KEY=sk-xxxx
-  export BOT_LLM_MODEL=deepseek-chat
+  # 先看计划，不发后端请求（仍会调用 LLM 生成人设）
+  python tools/ai_community_bot.py --dry-run --agents 3
+
+  # 换服务商只改环境变量（OpenAI 兼容协议）
+  export BOT_LLM_URL=https://open.bigmodel.cn/api/paas/v4/chat/completions
+  export BOT_LLM_MODEL=glm-4-flash
 """
 
 import argparse
@@ -49,10 +49,8 @@ LLM_KEY = os.environ.get("BOT_LLM_KEY", "")
 LLM_MODEL = os.environ.get("BOT_LLM_MODEL", "deepseek-chat")
 
 
-def llm_generate(prompt: str, max_retry: int = 2):
-    """调用便宜 LLM 生成一段文本；未配置 key 或失败时返回 None（由模板兜底）。"""
-    if not LLM_KEY:
-        return None
+def llm_generate(prompt: str, max_retry: int = 3):
+    """调用 LLM 生成一段文本；重试后仍失败则直接退出（无模板兜底，避免灌入假数据）。"""
     payload = json.dumps({
         "model": LLM_MODEL,
         "messages": [{"role": "user", "content": prompt}],
@@ -71,55 +69,39 @@ def llm_generate(prompt: str, max_retry: int = 2):
         except Exception as e:  # noqa: BLE001
             print(f"  [llm] 第{i + 1}次调用失败: {e}", file=sys.stderr)
             time.sleep(1 + i)
-    return None
+    sys.exit(f"[致命] LLM 调用连续失败，已中止（无兜底模板，不灌入假数据）。")
 
 
 # ---------------------------------------------------------------------------
-# 零成本兜底模板（完全不外部模型也能跑通全流程）
+# 人设 / 帖子 / 评论：全部由 LLM 实时生成（无本地兜底模板）
 # ---------------------------------------------------------------------------
-NAMES = ["夜航星", "程序员小李", "咖啡因过量", "山间竹雨", "深潜者Neo", "橘子汽水",
-         "凌晨四点的Bug", "旅行青蛙", "像素猫", "半糖去冰", "键盘诗人", "慢速光年"]
-
-BIOS = ["后端工程师，爱喝咖啡", "自由职业旅行者", "大三学生，准备考研",
-        "产品经理，业余跑者", "设计师，养了两只猫", "数据分析师，健身爱好者"]
-
-POST_TEMPLATES = [
-    "今天把困扰三天的并发 Bug 修了，原来是连接池没释放。记录一下，也提醒别踩坑。",
-    "周末爬了一次后山，云海真的值回票价。照片在评论区补。",
-    "读完《置身事内》，对地方政府激励机制有了全新理解，推荐。",
-    "自己搭了个 NAS，跑了套媒体服务器，全家终于不用抢视频会员了。",
-    "请教一下大家：Spring Boot 里虚拟线程和传统线程池，你们线上用的哪种？",
-    "早餐摊的豆浆从 2 块涨到 3 块了，通胀原来藏在生活细节里。",
-    "重写了博客的评论系统，接了个便宜大碗的国产模型做审核，效果意外的好。",
-    "跑步打卡第 30 天，配速没进步，但膝盖不疼了，这就是胜利。",
-]
-
-COMMENT_TEMPLATES = [
-    "同款经历！我也是栽在连接池上。",
-    "写得真好，收藏了。",
-    "顶一个，期待后续更新。",
-    "有链接吗？想看看详细版本。",
-    "哈哈哈太真实了。",
-    "学习了，正好在研究这个。",
-    "羡慕，我们这边看不到云海 :(",
-    "支持一下，欢迎多分享。",
-]
+def gen_persona(idx: int) -> dict:
+    """让 LLM 生成一个拟真人设：昵称 + 简介。输出 JSON: {"nickname":..., "bio":...}"""
+    p = (f"请为一个中文社交社区设计第{idx}个虚拟用户人设，要求像真实普通人："
+         f"一个 2~6 字的中文昵称（不要含'用户''测试'等字样），以及一句 10~20 字的个人简介"
+         f"（职业/爱好风格）。只输出 JSON：{{\"nickname\":\"...\",\"bio\":\"...\"}}")
+    raw = llm_generate(p) or ""
+    raw = raw.strip().strip("`").removeprefix("json").strip()
+    try:
+        d = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
+        nick, bio = str(d["nickname"]).strip(), str(d["bio"]).strip()
+        if nick and bio:
+            return {"nickname": nick[:20], "bio": bio[:50]}
+    except Exception:  # noqa: BLE001
+        pass
+    sys.exit(f"[致命] 人设生成失败或格式不对（无兜底模板）: {raw[:100]}")
 
 
 def gen_text(kind: str, persona: dict) -> str:
-    """优先走便宜 LLM，失败/未配置则走本地模板。"""
-    if LLM_KEY:
-        if kind == "post":
-            p = (f"你扮演社区用户「{persona['nickname']}」，人设：{persona['bio']}。"
-                 f"以他/她的口吻发一条中文社区动态，50~120字，口语化，不要话题标签，只输出正文。")
-        else:
-            p = (f"你是社区用户「{persona['nickname']}」。请针对下面这条帖子写一条 10~40 字的"
-                 f"中文评论，自然一点，可以带点个人经验：\n{persona.get('target', '')}\n只输出评论。")
-        out = llm_generate(p)
-        if out:
-            return out.replace("\n", "")[:280]
-    pool = POST_TEMPLATES if kind == "post" else COMMENT_TEMPLATES
-    return random.choice(pool)
+    """生成帖子正文或评论内容；LLM 失败会直接退出，不存在模板回退。"""
+    if kind == "post":
+        p = (f"你扮演社区用户「{persona['nickname']}」，人设：{persona['bio']}。"
+             f"以他/她的口吻发一条中文社区动态，50~120字，口语化，不要话题标签，只输出正文。")
+    else:
+        p = (f"你是社区用户「{persona['nickname']}」。请针对下面这条帖子写一条 10~40 字的"
+             f"中文评论，自然一点，可以带点个人经验：\n{persona.get('target', '')}\n只输出评论。")
+    out = llm_generate(p)
+    return out.replace("\n", "")[:280]
 
 
 # ---------------------------------------------------------------------------
@@ -268,15 +250,23 @@ def main() -> None:
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不发请求")
     args = ap.parse_args()
 
-    if LLM_KEY:
-        print(f"[llm] 使用模型 {LLM_MODEL} @ {LLM_URL}")
-    else:
-        print("[llm] 未配置 BOT_LLM_KEY，使用本地模板（0 成本）。"
-              "接 DeepSeek: export BOT_LLM_KEY=sk-xxx")
+    if not LLM_KEY:
+        sys.exit("[致命] 必须设置 BOT_LLM_KEY（脚本已移除零成本兜底模板，"
+                 "所有内容只由 LLM 生成）。例：export BOT_LLM_KEY=sk-xxx")
+    print(f"[llm] 使用模型 {LLM_MODEL} @ {LLM_URL}")
 
     state = load_state()
-    nicknames = random.sample(NAMES, min(args.agents, len(NAMES)))
-    personas = [{"nickname": n, "bio": random.choice(BIOS)} for n in nicknames]
+    # 人设由 LLM 实时生成；同一昵称的人设会缓存进 bot_state.json，避免重复消耗 token
+    personas = []
+    for i in range(1, args.agents + 1):
+        persona = gen_persona(i)
+        cached = state["accounts"].get(persona["nickname"])
+        if cached and cached.get("bio"):
+            persona["bio"] = cached["bio"]      # 复用旧账号已有简介，保持一致性
+        else:
+            state.setdefault("personas", {})[persona["nickname"]] = persona["bio"]
+        personas.append(persona)
+        print(f"[persona] {persona['nickname']}：{persona['bio']}")
 
     tokens = {}
     for p in personas:
