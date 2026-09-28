@@ -16,6 +16,7 @@ let state = {
   token: localStorage.getItem("bowall.token"),
   chat: null,
   unreadMessages: 0,
+  routeToken: 0,
 };
 if (!state.token) state.user = null;
 const avatar = (user) =>
@@ -29,6 +30,15 @@ const esc = (value) =>
         c
       ],
   );
+function logout() {
+  localStorage.removeItem("bowall.user");
+  localStorage.removeItem("bowall.token");
+  state.user = null;
+  state.token = null;
+  state.chat = null;
+  state.unreadMessages = 0;
+  go("home");
+}
 async function api(path, options = {}) {
   const res = await fetch(path, {
     ...options,
@@ -38,7 +48,17 @@ async function api(path, options = {}) {
       ...(options.headers || {}),
     },
   });
-  const body = await res.json();
+  if (res.status === 401) {
+    // The token expired or was revoked server-side: drop it and show the login page.
+    logout();
+    throw new Error("登录已过期，请重新登录");
+  }
+  let body;
+  try {
+    body = await res.json();
+  } catch {
+    throw new Error(`服务器返回了无法解析的响应（HTTP ${res.status}）`);
+  }
   if (!res.ok || body.code !== 1) throw new Error(body.msg || "请求失败");
   return body.data;
 }
@@ -95,19 +115,54 @@ function empty(title, copy) {
   return `<section class="card empty"><strong>${title}</strong><span>${copy}</span></section>`;
 }
 async function home() {
+  feedPage = 1;
   app.innerHTML = `<header class="page-head"><div><h1>博墙</h1><p>记录此刻，也看见彼此。</p></div><button class="primary" data-route="compose">发布</button></header><div id="feed" class="feed">${empty("正在加载…", "")}</div>`;
+  // Route token: ignore responses that arrive after the user navigated away.
+  const routeToken = state.routeToken;
   try {
     const posts = await api(
       `/posts/getAllPosts?page=1&size=20&account=${encodeURIComponent(state.user.account)}`,
     );
+    if (routeToken !== state.routeToken || !document.querySelector("#feed")) return;
     document.querySelector("#feed").innerHTML = posts.length
-      ? posts.map(postCard).join("")
+      ? posts.map(postCard).join("") +
+        `<button id="load-more" class="quiet load-more">加载更多</button>`
       : empty("还没有动态", "成为第一个发布内容的人吧。");
+    const more = document.querySelector("#load-more");
+    if (more) more.onclick = () => loadMorePosts(posts, more);
   } catch (e) {
-    document.querySelector("#feed").innerHTML = empty(
-      "动态加载失败",
-      esc(e.message),
+    if (routeToken !== state.routeToken) return;
+    const feed = document.querySelector("#feed");
+    if (feed) feed.innerHTML = empty("动态加载失败", esc(e.message));
+  }
+}
+
+let feedPage = 1;
+async function loadMorePosts(loaded, button) {
+  const routeToken = state.routeToken;
+  button.disabled = true;
+  button.textContent = "加载中…";
+  try {
+    const page = feedPage + 1;
+    const posts = await api(
+      `/posts/getAllPosts?page=${page}&size=20&account=${encodeURIComponent(state.user.account)}`,
     );
+    if (routeToken !== state.routeToken || !document.contains(button)) return;
+    if (!posts.length) {
+      button.remove();
+      toast("没有更多动态了");
+      return;
+    }
+    feedPage = page;
+    loaded.push(...posts);
+    button.insertAdjacentHTML("beforebegin", posts.map(postCard).join(""));
+    button.disabled = false;
+    button.textContent = "加载更多";
+  } catch (e) {
+    if (routeToken !== state.routeToken) return;
+    toast(e.message);
+    button.disabled = false;
+    button.textContent = "加载更多";
   }
 }
 function compose() {
@@ -187,6 +242,7 @@ async function discover() {
   };
 }
 async function messages() {
+  const routeToken = state.routeToken;
   app.innerHTML = `<header class="page-head"><div><h1>消息</h1><p>和朋友聊聊最近的动态。</p></div></header><section class="card friends-panel"><div class="section-title"><b>互关好友</b><span id="friend-count">加载中…</span></div><div id="friend-list" class="friend-list"></div></section><section class="message-list conversation-list"><button id="interaction-entry" class="card interaction-entry"><span class="interaction-icon">♡</span><span><b>互动消息</b><small id="interaction-summary">正在加载评论与回复…</small></span><i id="interaction-badge" class="badge" hidden></i><span class="interaction-arrow">›</span></button><section id="interaction-feed" class="interaction-feed" hidden></section><div id="conversation-list">${empty("正在加载…", "")}</div></section>`;
   try {
     const [friendGroups, list, commentNotifications] = await Promise.all([
@@ -194,6 +250,8 @@ async function messages() {
       api(`/message/notification?account=${encodeURIComponent(state.user.account)}`),
       api(`/comments/notification?account=${encodeURIComponent(state.user.account)}`).catch(() => []),
     ]);
+    // Ignore stale responses when the user already navigated to another page.
+    if (routeToken !== state.routeToken || !document.querySelector("#friend-list")) return;
     const interactions = (commentNotifications || []).filter((item) => item.account !== state.user.account);
     updateInteractionSummary(interactions);
     document.querySelector("#interaction-entry").onclick = () => showInteractions(interactions);
@@ -290,6 +348,7 @@ async function showInteractionDetail(postId, commentId) {
 }
 async function profile(account = state.profileAccount || state.user.account) {
   const isMine = account === state.user.account;
+  const routeToken = state.routeToken;
   app.innerHTML = `<section class="card profile"><div class="profile-top"><img class="avatar" src="${avatar({ account })}" alt=""><div><h1>正在加载…</h1><p>个人主页</p></div></div><div class="stats" id="stats"><span><b>–</b>动态</span><span><b>–</b>粉丝</span><span><b>–</b>关注</span></div><div id="profile-actions" class="profile-actions"></div></section><div id="mine" class="feed" style="margin-top:16px"></div>`;
   try {
     const [u, p, f, fo, posts, followsTarget, targetFollowsMe] = await Promise.all([
@@ -301,6 +360,8 @@ async function profile(account = state.profileAccount || state.user.account) {
       isMine ? Promise.resolve(null) : api(`/fans/isfan?account=${encodeURIComponent(account)}&fansAccount=${encodeURIComponent(state.user.account)}`),
       isMine ? Promise.resolve(null) : api(`/fans/isfan?account=${encodeURIComponent(state.user.account)}&fansAccount=${encodeURIComponent(account)}`),
     ]);
+    // Ignore stale responses when the user already navigated to another page.
+    if (routeToken !== state.routeToken || !document.querySelector(".profile")) return;
     document.querySelector(".profile-top").innerHTML = `<img class="avatar" src="${avatar(u)}" alt="${esc(u.name || "用户")}的头像"><div><h1>${esc(u.name || u.account)}</h1><p>${esc(u.sign || "这个人还没有留下签名。")}</p></div>`;
     document.querySelector("#stats").innerHTML =
       `<span><b>${p}</b>动态</span><span><b>${f}</b>粉丝</span><span><b>${fo}</b>关注</span>`;
@@ -479,6 +540,7 @@ function editProfile() {
 }
 async function chat(account, name) {
   state.chat = { account, name };
+  localStorage.setItem("bowall.chat", JSON.stringify(state.chat));
   app.innerHTML = `<section class="card chat"><header class="chat-header"><button class="chat-back" data-route="messages" aria-label="返回消息列表">‹</button><div id="chat-contact" class="chat-contact"><img class="avatar" src="${avatar({ name })}" alt=""><span><b>${esc(name)}</b><small>私信聊天</small></span></div></header><div id="chat-stream" class="chat-stream"><p class="hint">正在加载消息…</p></div><form id="chat-send" class="chat-send"><input name="content" maxlength="1000" placeholder="输入消息…" autocomplete="off"><button class="primary">发送</button></form></section>`;
   let peer = { account, name };
   try {
@@ -495,10 +557,15 @@ async function chat(account, name) {
       );
       const stream = document.querySelector("#chat-stream");
       if (!stream) return;
+      let lastDay = "";
       stream.innerHTML = (d.records || []).map((m) => {
         const mine = m.senderAccount === state.user.account;
         const user = mine ? state.user : peer;
-        return `<div class="chat-time">${formatPostTime(m.updateDate)}</div><div class="chat-message ${mine ? "mine" : ""}"><img class="avatar" src="${avatar(user)}" alt=""><div><div class="bubble">${esc(m.content)}</div></div></div>`;
+        const date = new Date(m.updateDate || Date.now());
+        const day = Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString("zh-CN");
+        const dayDivider = day && day !== lastDay ? `<div class="chat-day">${day === new Date().toLocaleDateString("zh-CN") ? "今天" : esc(day)}</div>` : "";
+        if (day) lastDay = day;
+        return `${dayDivider}<div class="chat-time">${formatPostTime(m.updateDate)}</div><div class="chat-message ${mine ? "mine" : ""}"><img class="avatar" src="${avatar(user)}" alt=""><div><div class="bubble">${esc(m.content)}</div></div></div>`;
       }).join("") || '<p class="hint chat-empty">还没有消息，打个招呼吧。</p>';
       stream.scrollTop = stream.scrollHeight;
     } catch (e) {
@@ -520,6 +587,8 @@ async function chat(account, name) {
     const input = e.target.content;
     const content = input.value.trim();
     if (!content) return;
+    const sendButton = e.target.querySelector("button");
+    sendButton.disabled = true;
     try {
       await api("/message/sendMessage", {
         method: "POST",
@@ -529,10 +598,27 @@ async function chat(account, name) {
           content,
         }),
       });
+      // Optimistic echo so the message appears instantly, then reconcile with the server.
+      const stream = document.querySelector("#chat-stream");
+      if (stream) {
+        const emptyHint = stream.querySelector(".chat-empty");
+        if (emptyHint) emptyHint.remove();
+        stream.insertAdjacentHTML(
+          "beforeend",
+          `<div class="chat-time">${formatPostTime(Date.now())}</div><div class="chat-message mine pending"><img class="avatar" src="${avatar(state.user)}" alt=""><div><div class="bubble">${esc(content)}</div></div></div>`,
+        );
+        stream.scrollTop = stream.scrollHeight;
+      }
       input.value = "";
-      load();
+      input.focus();
+      await load();
     } catch (err) {
       toast(err.message);
+      // Roll back the optimistic bubble when the server rejected the message.
+      const pending = document.querySelector("#chat-stream .chat-message.pending");
+      if (pending) pending.remove();
+    } finally {
+      sendButton.disabled = false;
     }
   };
 }
@@ -562,6 +648,7 @@ function go(route) {
   render();
 }
 function render() {
+  state.routeToken += 1;
   renderNav();
   refreshUnreadMessages();
   if (!state.user) return login();
@@ -570,8 +657,20 @@ function render() {
   else if (state.route === "compose") compose();
   else if (state.route === "messages") messages();
   else if (state.route === "profile") profile();
-  else if (state.route === "chat") chat(state.chat.account, state.chat.name);
-  else home();
+  else if (state.route === "chat") {
+    // Deep-linking to #chat without a conversation falls back to the message list.
+    if (!state.chat) return messages();
+    chat(state.chat.account, state.chat.name);
+  } else home();
+}
+// A page refresh loses the in-memory conversation, so restore it from storage.
+if (state.route === "chat" && !state.chat) {
+  try {
+    const saved = JSON.parse(localStorage.getItem("bowall.chat") || "null");
+    if (saved?.account) state.chat = saved;
+  } catch {
+    localStorage.removeItem("bowall.chat");
+  }
 }
 document.addEventListener("click", (e) => {
   const target = e.target.closest("[data-route]");
@@ -583,12 +682,19 @@ document.addEventListener("click", (e) => {
       account: chatButton.dataset.chat,
       name: chatButton.dataset.name,
     };
+    localStorage.setItem("bowall.chat", JSON.stringify(state.chat));
     render();
   }
   const profileButton = e.target.closest("[data-profile]");
   if (profileButton) openProfile(profileButton.dataset.profile);
   const like = e.target.closest("[data-like]");
-  if (like)
+  if (like) {
+    // Optimistic feedback: toggle the icon right away, then refresh from the server.
+    const icon = like.querySelector(".action-icon");
+    if (icon) {
+      const wasLiked = icon.src.includes("liked.png");
+      icon.src = `/assets/interact/${wasLiked ? "like" : "liked"}.png`;
+    }
     api("/like", {
       method: "POST",
       body: JSON.stringify({
@@ -600,6 +706,7 @@ document.addEventListener("click", (e) => {
         render();
       })
       .catch((x) => toast(x.message));
+  }
 
   const deleteButton = e.target.closest("[data-delete]");
   if (deleteButton) deletePost(deleteButton.dataset.delete);
@@ -620,13 +727,7 @@ async function deletePost(postId) {
   }
 }
 
-document.querySelector("#logout").onclick = () => {
-  localStorage.removeItem("bowall.user");
-  localStorage.removeItem("bowall.token");
-  state.user = null;
-  state.token = null;
-  go("home");
-};
+document.querySelector("#logout").onclick = logout;
 window.addEventListener("hashchange", () => {
   const hash = location.hash.slice(1) || "home";
   const profileMatch = hash.match(/^profile\/(.+)$/);
@@ -715,17 +816,25 @@ function postCard(post) {
 function previewImage(src) {
   const modal = document.createElement("div");
   modal.className = "lightbox";
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  modal.setAttribute("aria-label", "图片预览");
   modal.innerHTML = `<img src="${esc(src)}" alt="图片预览"><button aria-label="关闭预览">×</button>`;
   document.body.append(modal);
-  modal.onclick = (e) => {
-    if (e.target === modal || e.target.tagName === "BUTTON") modal.remove();
+  const previousOverflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+  const close = () => {
+    modal.remove();
+    document.body.style.overflow = previousOverflow;
+    document.removeEventListener("keydown", onKey);
   };
-  document.addEventListener("keydown", function close(e) {
-    if (e.key === "Escape") {
-      modal.remove();
-      document.removeEventListener("keydown", close);
-    }
-  });
+  const onKey = (e) => {
+    if (e.key === "Escape") close();
+  };
+  modal.onclick = (e) => {
+    if (e.target === modal || e.target.tagName === "BUTTON") close();
+  };
+  document.addEventListener("keydown", onKey);
 }
 document.addEventListener("click", (e) => {
   const image = e.target.closest("[data-preview-image]");
