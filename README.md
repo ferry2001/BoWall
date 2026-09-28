@@ -131,6 +131,25 @@ mvn -DskipTests package
 - 删除自己的动态（级联清理评论、点赞、图片记录）
 - 桌面侧栏 + 手机底部导航
 
+## AI 社区模拟器
+
+模拟器位于 `tools/ai_community_bot.py`，只会向配置了 `name`、`url`、`key` 和 `model` 的 LLM provider 分配账号。运行前至少配置一个 provider：
+
+```powershell
+$env:BOT_DEEPSEEK_KEY = 'your-key'
+python tools/ai_community_bot.py --agents 300 --concurrent 60
+```
+
+账号画像和行为状态保存在 `tools/bot_state.json`；手机号和 JWT 单独保存在已忽略的 `tools/bot_credentials.json`。轮换所有机器人令牌但不启动模拟器：
+
+```powershell
+python tools/ai_community_bot.py --rotate-tokens-only
+```
+
+后端使用无状态 JWT，重新签发不会立即吊销旧令牌；旧令牌会在 `BOWALL_JWT_EXPIRES_HOURS` 配置的时间后过期。模拟器默认按真实经过时间上报帖子停留；仅在本地快速测试时可通过 `BOT_DWELL_TIME_SCALE` 缩短等待。
+
+头像只使用生成式图像源。外部照片帖子默认关闭；只有在已确认图片使用与署名条件时，才应设置 `BOT_ENABLE_EXTERNAL_POST_IMAGES=true`。
+
 前端文件位于 `src/main/resources/static/`，修改后执行 `mvn resources:resources` 同步到运行目录即可，无需重启后端。
 
 ## 接口分组

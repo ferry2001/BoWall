@@ -1,1 +1,5 @@
 (empty)
+tools/bot_credentials.json*
+tools/bot_state.json*
+tools/logs/
+logs/
