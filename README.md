@@ -35,9 +35,13 @@ src/main/resources/
 └── application.yml # 主配置（含 multipart 上传上限）
 
 src/test/            # 部分测试会连接真实数据库或本机图片路径，默认不应直接运行
+
+docs/                # 版本化接口协议与开发文档
 ```
 
 ## 本地启动
+
+接口协议详见：[BoWall 0.5.2 接口协议](docs/API_PROTOCOL_0.5.2.md)
 
 ### 1. 环境要求
 
