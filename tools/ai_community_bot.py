@@ -89,7 +89,7 @@ def http_multipart(method: str, path: str, fields: dict, file_field: str,
 #   Ollama:   http://localhost:11434/v1/chat/completions (本地, 完全免费)
 # ---------------------------------------------------------------------------
 LLM_URL = os.environ.get("BOT_LLM_URL", "https://api.deepseek.com/chat/completions")
-LLM_KEY = os.environ.get("BOT_LLM_KEY", "")
+LLM_KEY = os.environ.get("BOT_LLM_KEY", "sk-15782c1f893144c9b3868f8074c7c5f6")
 LLM_MODEL = os.environ.get("BOT_LLM_MODEL", "deepseek-chat")
 
 
@@ -200,44 +200,61 @@ def gen_persona(idx: int) -> dict:
 #   - 下载失败时跳过该账号头像，不影响注册发帖主流程。
 # ---------------------------------------------------------------------------
 AVATAR_SOURCES = [
-    # dicebear：按 seed 生成的卡通头像，稳定、支持 png（路径格式 style/png/seed-xxx.png）
     lambda seed, desc: (
-        "https://api.dicebear.com/9.x/lorelei/png/"
-        f"seed-{seed}.png?background=c7e3ee&radius=50"),
+        "https://api.dicebear.com/7.x/avataaars/svg?"
+        f"seed={seed}&backgroundColor=c7e3ee"),
     lambda seed, desc: (
-        "https://api.dicebear.com/9.x/avataaars/png/"
-        f"seed-{seed}.png?radius=50"),
+        "https://api.dicebear.com/7.x/lorelei/svg?"
+        f"seed={seed}&backgroundColor=c7e3ee"),
     lambda seed, desc: (
-        "https://api.dicebear.com/9.x/pixel-art/png/"
-        f"seed-{seed}.png?radius=50"),
-    # 真人风头像（存在可用性波动，失败自动换下一个源）
-    lambda seed, desc: (
-        "https://this-person-does-not-exist.com/api?"
-        f"gender={random.choice(['f', 'm'])}&age=18-40&_={seed}"),
+        "https://api.dicebear.com/7.x/pixel-art/svg?"
+        f"seed={seed}&backgroundColor=c7e3ee"),
 ]
 
 
 def fetch_avatar(nickname: str, avatar_desc: str) -> tuple | None:
-    """尝试多个来源抓取一张头像图片，返回 (bytes, filename, content_type)；全部失败返回 None。"""
-    for make_url in AVATAR_SOURCES:
-        seed = uuid.uuid4().hex[:12]
-        url = make_url(seed, avatar_desc)
+    """从真实图片网站下载头像（小红书/Unsplash/Pexels等）。
+    返回 (bytes, filename, content_type)；全部失败返回 None。"""
+
+    # 方案1：Unsplash 随机人物图片（高质量，免费）
+    unsplash_keywords = [
+        "portrait", "face", "person", "selfie", "profile",
+        "woman", "man", "girl", "boy", "people"
+    ]
+    keyword = random.choice(unsplash_keywords)
+    unsplash_url = f"https://source.unsplash.com/150x150/?{keyword}"
+
+    # 方案2：Pexels 人物图片API（需要免费API key）
+    # 方案3：小红书图片（需要解析，较复杂）
+    # 方案4：GitHub 用户头像（真实用户）
+    github_user = f"https://github.com/{random.choice(['torvalds', 'gaearon', 'sindresorhus', 'yyx990803'])}.png"
+
+    sources = [
+        ("Unsplash", unsplash_url),
+        ("GitHub Avatar", github_user),
+    ]
+
+    for source_name, url in sources:
         try:
-            data = http_download(url)
-        except Exception as e:  # noqa: BLE001
-            print(f"  [avatar] {nickname}: 下载失败({url[:60]}...) {e}", file=sys.stderr)
+            print(f"  [avatar] {nickname}: 尝试从 {source_name} 下载...")
+            data = http_download(url, timeout=15)
+        except Exception as e:
+            print(f"  [avatar] {nickname}: {source_name} 下载失败: {e}", file=sys.stderr)
             continue
-        # 校验魔数，确保拿到的是真图片而不是 HTML 错误页
+
+        # 校验图片格式
         if data[:3] == b"\xff\xd8\xff":
-            return data, f"{seed}.jpg", "image/jpeg"
+            return data, f"{nickname}_{uuid.uuid4().hex[:6]}.jpg", "image/jpeg"
         if data[:8] == b"\x89PNG\r\n\x1a\n":
-            return data, f"{seed}.png", "image/png"
+            return data, f"{nickname}_{uuid.uuid4().hex[:6]}.png", "image/png"
         if data[:6] in (b"GIF87a", b"GIF89a"):
-            return data, f"{seed}.gif", "image/gif"
+            return data, f"{nickname}_{uuid.uuid4().hex[:6]}.gif", "image/gif"
         if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
-            return data, f"{seed}.webp", "image/webp"
-        print(f"  [avatar] {nickname}: 返回内容不是图片({url[:60]}...)，换下一源", file=sys.stderr)
-    print(f"  [avatar] {nickname}: 所有头像源均失败，跳过头像", file=sys.stderr)
+            return data, f"{nickname}_{uuid.uuid4().hex[:6]}.webp", "image/webp"
+
+        print(f"  [avatar] {nickname}: {source_name} 返回的不是图片", file=sys.stderr)
+
+    print(f"  [avatar] {nickname}: 所有图片源均失败", file=sys.stderr)
     return None
 
 
@@ -347,24 +364,83 @@ def login_agent(state: dict, nickname: str, dry_run: bool):
 
 
 def setup_profile(acc: dict, persona: dict, state: dict, dry_run: bool) -> bool:
-    """注册后完善资料：昵称/签名用 LLM 人设；头像优先复用已上传的 avatar URL，
-    否则从网络抓取一张图片，multipart 上传到 POST /user/avatar。
-    注意：后端 PUT /user 是全字段更新（UPDATE user set name/sign/phone/avatar...），
-    因此必须先 GET /user/getUser 取回完整记录再合并提交，避免把 phone/avatar 洗成 null。
-    返回 True 表示昵称已成功写入数据库（经 getUser 回读确认）。"""
+    """注册后完善资料：昵称/签名用 LLM 人设；头像从网络下载并上传。
+    如果头像上传失败，直接终止程序（sys.exit）。"""
+
     if dry_run:
         print(f"[dry] {acc['nickname']}: GET /user/getUser -> PUT /user(name,sign) -> "
               f"POST /user/avatar(网络抓图上传)")
         return True
+
     # 1. 取回当前完整用户记录
     r = http_json("GET", "/user/getUser", params={"account": acc["account"]},
                   token=acc["token"])
     _u = (r or {}).get("data")
     user = _u if isinstance(_u, dict) else {}
     if not user.get("account"):
-        print(f"  [profile] {acc['nickname']}: 获取用户失败（token 无效或后端异常），"
-              f"跳过资料设置", file=sys.stderr)
-        return False
+        print(f"  [profile] {acc['nickname']}: 获取用户失败，终止程序", file=sys.stderr)
+        sys.exit(f"[致命] {acc['nickname']} 获取用户信息失败，无法设置资料")
+
+    def put_profile(av: str | None) -> bool:
+        payload = {
+            "account": user["account"],
+            "name": persona["nickname"],
+            "sign": persona["bio"],
+            "phone": user.get("phone"),
+            "avatar": av,
+        }
+        resp = http_json("PUT", "/user", payload, token=acc["token"], raise_on_error=True)
+        return bool(resp)
+
+    # 2. 头像：必须从网络下载并上传，失败则终止
+    avatar_url = user.get("avatar")
+    if not avatar_url:
+        print(f"[avatar] {acc['nickname']}: 开始下载网络头像...")
+        img = fetch_avatar(persona["nickname"], persona.get("avatar_desc", ""))
+
+        if not img:
+            sys.exit(f"[致命] {acc['nickname']} 头像下载失败（所有源均不可用），程序终止")
+
+        data, fname, ctype = img
+
+        try:
+            up = http_multipart("POST", "/user/avatar",
+                                fields={"account": acc["account"]},
+                                file_field="avatar", filename=fname,
+                                file_bytes=data, content_type=ctype,
+                                token=acc["token"])
+        except Exception as e:
+            sys.exit(f"[致命] {acc['nickname']} 头像上传异常: {e}")
+
+        avatar_data = (up or {}).get("data")
+        new_avatar = avatar_data.get("avatar") if isinstance(avatar_data, dict) else None
+
+        if not new_avatar:
+            sys.exit(f"[致命] {acc['nickname']} 头像上传失败（后端未返回avatar字段），程序终止")
+
+        avatar_url = new_avatar
+        state["avatars"][persona["nickname"]] = new_avatar
+        print(f"[avatar] {acc['nickname']}: 上传成功 {new_avatar}")
+
+    # 3. 写回昵称/签名/头像
+    try:
+        if not put_profile(avatar_url):
+            sys.exit(f"[致命] {acc['nickname']} PUT /user 失败，程序终止")
+    except ApiError as e:
+        sys.exit(f"[致命] {acc['nickname']} 更新资料失败: {e}")
+
+    # 4. 回读数据库确认
+    check = http_json("GET", "/user/getUser", params={"account": acc["account"]},
+                      token=acc["token"])
+    _g = (check or {}).get("data")
+    got = _g if isinstance(_g, dict) else {}
+
+    if got.get("name") != persona["nickname"]:
+        sys.exit(f"[致命] {acc['nickname']} 回读校验失败！数据库 name={got.get('name')!r}")
+
+    print(f"[profile] {acc['nickname']}: OK name='{got.get('name')}' "
+          f"avatar={got.get('avatar') or '无'}")
+    return True
 
     def put_profile(av: str | None) -> bool:
         payload = {

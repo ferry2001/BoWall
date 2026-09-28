@@ -1,1 +1,101 @@
-{}
+{
+  "accounts": {
+    "半糖去冰": {
+      "phone": "19943643557",
+      "account": "c22d8e6a-869e-448a-86e5-820a51d9b253",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJjMjJkOGU2YS04NjllLTQ0OGEtODZlNS04MjBhNTFkOWIyNTMiLCJpYXQiOjE3OTA1OTE1NjcsImV4cCI6MTc5MDg1MDc2N30.0E-Owp3iph99fy1-WAvC1SzoLEKw43jBde8n6-sMLJQ",
+      "nickname": "半糖去冰"
+    },
+    "梅子黄时雨": {
+      "phone": "19973067498",
+      "account": "e925b160-9b6b-416f-b439-4e0754a08e6b",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlOTI1YjE2MC05YjZiLTQxNmYtYjQzOS00ZTA3NTRhMDhlNmIiLCJpYXQiOjE3OTA1OTE1NjksImV4cCI6MTc5MDg1MDc2OX0.I_CbVRzgqB_zoeNF-YgHkPQlqsTz2VHYO9ceoH1u8X8",
+      "nickname": "梅子黄时雨"
+    },
+    "晚风拾忆": {
+      "phone": "19912689513",
+      "account": "8881ebf0-c541-4d45-a553-aec3189f8654",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI4ODgxZWJmMC1jNTQxLTRkNDUtYTU1My1hZWMzMTg5Zjg2NTQiLCJpYXQiOjE3OTA1OTE1NzAsImV4cCI6MTc5MDg1MDc3MH0.J-EoHiHkETP4EBUigvE7Q1wgbE9TFbVr8cQf8vHLvUo",
+      "nickname": "晚风拾忆"
+    },
+    "晚风轻语": {
+      "phone": "19953652822",
+      "account": "52196ac7-9d76-49b6-8a47-bc61e9738423",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI1MjE5NmFjNy05ZDc2LTQ5YjYtOGE0Ny1iYzYxZTk3Mzg0MjMiLCJpYXQiOjE3OTA1OTE3MjAsImV4cCI6MTc5MDg1MDkyMH0.l2IzFdPfAjBw-hgpMRBsS0-fyMCB3hVw_qVRy31DFVQ",
+      "nickname": "晚风轻语"
+    },
+    "晚风拾光": {
+      "phone": "19916578074",
+      "account": "dff4414b-1868-4af3-a3db-1ddcd75d14e8",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJkZmY0NDE0Yi0xODY4LTRhZjMtYTNkYi0xZGRjZDc1ZDE0ZTgiLCJpYXQiOjE3OTA1OTE3MjEsImV4cCI6MTc5MDg1MDkyMX0.rc8TxtNSHzbOMdYlB9bWSEHEcN5mTum54ljeLcFDsF8",
+      "nickname": "晚风拾光"
+    },
+    "晚风归途": {
+      "phone": "19910448299",
+      "account": "afbaf659-c8f2-480a-9bbd-e173659f98b9",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZmJhZjY1OS1jOGYyLTQ4MGEtOWJiZC1lMTczNjU5Zjk4YjkiLCJpYXQiOjE3OTA1OTE3MjIsImV4cCI6MTc5MDg1MDkyMn0.LxPZQhrnDKVnJSLkXn8lthTDSVZKAygXrJg7DbQ3tO0",
+      "nickname": "晚风归途"
+    },
+    "晚风信箱": {
+      "phone": "19924107221",
+      "account": "1715cbe1-4296-4de1-b05c-2b9441eeeea3",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxNzE1Y2JlMS00Mjk2LTRkZTEtYjA1Yy0yYjk0NDFlZWVlYTMiLCJpYXQiOjE3OTA1OTIwNTEsImV4cCI6MTc5MDg1MTI1MX0.1zB0rFY6Ynm_D53K3sUJ4WMyuFv4sU1ZjHoi-C1gB1M",
+      "nickname": "晚风信箱"
+    },
+    "晚风煮酒": {
+      "phone": "19961978680",
+      "account": "916e91b7-cca6-4cc9-a959-8a62844602b7",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI5MTZlOTFiNy1jY2E2LTRjYzktYTk1OS04YTYyODQ0NjAyYjciLCJpYXQiOjE3OTA1OTIwNTQsImV4cCI6MTc5MDg1MTI1NH0.ijAd5lHiFFSW3sXbJbHjRUDJhG-e4kETHVsmlUb7bCA",
+      "nickname": "晚风煮酒"
+    },
+    "南巷旧人": {
+      "phone": "19914928558",
+      "account": "467a3247-152b-4204-9c41-7af9d4e3dbd4",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0NjdhMzI0Ny0xNTJiLTQyMDQtOWM0MS03YWY5ZDRlM2RiZDQiLCJpYXQiOjE3OTA1OTIwNTYsImV4cCI6MTc5MDg1MTI1Nn0.d4zUkHhVFGPcY6cTl49Qjs2JVOFou0GFSehUUl39p-4",
+      "nickname": "南巷旧人"
+    },
+    "晚风便利店": {
+      "phone": "19957739741",
+      "account": "f7748706-7e05-41d5-8ff4-cf022f8d3985",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJmNzc0ODcwNi03ZTA1LTQxZDUtOGZmNC1jZjAyMmY4ZDM5ODUiLCJpYXQiOjE3OTA1OTIyNTIsImV4cCI6MTc5MDg1MTQ1Mn0.ydgKwdMtHDy1XWnXfWqe81CwPW57Z0DIbmoLbNlF3D8",
+      "nickname": "晚风便利店"
+    },
+    "晚风叙旧": {
+      "phone": "19920703722",
+      "account": "3b750294-e009-491a-a6b6-b53c66e30815",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIzYjc1MDI5NC1lMDA5LTQ5MWEtYTZiNi1iNTNjNjZlMzA4MTUiLCJpYXQiOjE3OTA1OTIyNTUsImV4cCI6MTc5MDg1MTQ1NX0.yFiTdWRVPLBD_J4fEbOmn3HtucwxRBeiy6lj0CT9fNA",
+      "nickname": "晚风叙旧"
+    },
+    "晚风散步": {
+      "phone": "19946286744",
+      "account": "eaac0e6b-ce83-4682-ba08-162b8325bf80",
+      "token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJlYWFjMGU2Yi1jZTgzLTQ2ODItYmEwOC0xNjJiODMyNWJmODAiLCJpYXQiOjE3OTA1OTIyOTcsImV4cCI6MTc5MDg1MTQ5N30.eU-yY9q46JOounlhtZvygU58x882izf5d64htsR2hvw",
+      "nickname": "晚风散步"
+    }
+  },
+  "personas": {
+    "半糖去冰": "靠调奶茶续命，代码写到半糖刚好。",
+    "梅子黄时雨": "梅子黄时雨，专治各种拍照手残。",
+    "晚风拾忆": "下班后爱拍晚霞，顺手捡些旧时光。",
+    "晚风轻语": "晚风轻语：拍晚霞、写短句，日子慢慢过。",
+    "晚风拾光": "下班后爱拍晚霞，记录生活的小美好。",
+    "晚风归途": "下班后追着晚风骑车，一路遛回我的小窝。",
+    "晚风信箱": "下班后替晚风收信，我是修电脑的。",
+    "晚风煮酒": "下班顺路买半斤卤味，回家就着晚风喝两口。",
+    "南巷旧人": "爱在巷口晒太阳，顺便帮邻居修修小家电。",
+    "晚风便利店": "下班后在这儿吹晚风，顺便卖点关东煮。",
+    "晚风叙旧": "晚风里修老照片，听每张底片讲从前。",
+    "晚风散步": "晚饭后沿着河边慢慢走，顺手拍点小视频。"
+  },
+  "avatars": {
+    "半糖去冰": "/images/b3cf9b22-d4b8-4742-80b3-cfb8b14a5973.png",
+    "梅子黄时雨": "/images/695bead7-a112-4bb6-b019-90d7897e8bf6.png",
+    "晚风拾忆": "/images/91dba28f-8dd9-4577-9cb0-f810073ded25.png",
+    "晚风轻语": "/images/854c9bca-5a3d-477b-a8f0-bfab1dbcfdf3.png",
+    "晚风拾光": "/images/884e497d-c548-4110-91fe-9210807a12d1.png",
+    "晚风归途": "/images/d0dd7eba-1cba-44b2-8aa6-edaf25eb4478.png",
+    "晚风便利店": "/images/ad33f245-8e46-4da4-9ebf-8d784ee6ff8d.jpg",
+    "晚风叙旧": "/images/05368782-3806-4cfc-a813-6029b7ec311c.jpg",
+    "晚风散步": "/images/8a302009-7e62-4de0-8933-b872703c4094.jpg"
+  }
+}
