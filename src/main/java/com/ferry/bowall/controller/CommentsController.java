@@ -7,6 +7,7 @@ import com.ferry.bowall.entity.*;
 import com.ferry.bowall.enums.Comments.CommentsIsDel;
 import com.ferry.bowall.enums.Comments.CommentsIsRead;
 import com.ferry.bowall.enums.Image.ImageIsCover;
+import com.ferry.bowall.filter.JwtAuthInterceptor;
 import com.ferry.bowall.service.CommentsService;
 import com.ferry.bowall.service.ImageService;
 import com.ferry.bowall.service.PostsService;
@@ -14,6 +15,7 @@ import com.ferry.bowall.service.UserService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
+import jakarta.servlet.http.HttpServletRequest;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -43,12 +45,27 @@ public class CommentsController {
         String postsId = map.get("postsId").toString();
         String account = map.get("account").toString();
         String text = map.get("comments").toString();
+        String parentId = map.get("parentId") == null ? null : map.get("parentId").toString();
+        String replyToAccount = map.get("replyToAccount") == null ? null : map.get("replyToAccount").toString();
 
+        if (postsService.getById(postsId) == null) {
+            return R.error("动态不存在");
+        }
         Comments comments = new Comments();
+        if (parentId != null && !parentId.isBlank()) {
+            Comments parent = commentsService.getById(parentId);
+            if (parent == null || !postsId.equals(parent.getPostsId())) {
+                return R.error("回复的评论不存在");
+            }
+            replyToAccount = parent.getAccount();
+            comments.setParentId(parentId);
+        }
+
         comments.setId(uuid.toString());
         comments.setPostsId(postsId);
         comments.setAccount(account);
         comments.setText(text);
+        comments.setReplyToAccount(replyToAccount);
         comments.setUpdateDate(LocalDateTime.now());
 
         commentsService.save(comments);
@@ -69,6 +86,9 @@ public class CommentsController {
             postIds.add(postId);
             accountPostsHashMap.put(postId, post);
         }
+        if (postIds.isEmpty()) {
+            return R.success(new ArrayList<>());
+        }
 
         LambdaQueryWrapper<Image> imageLambdaQueryWrapper = new LambdaQueryWrapper<>();
         imageLambdaQueryWrapper.in(Image::getPostsId, postIds)
@@ -81,6 +101,7 @@ public class CommentsController {
         LambdaQueryWrapper<Comments> commentsLambdaQueryWrapper = new LambdaQueryWrapper<>();
         commentsLambdaQueryWrapper.in(Comments::getPostsId, postIds)
                                    .eq(Comments::getIsDel, CommentsIsDel.no)
+                                   .ne(Comments::getAccount, account)
                                    .orderByDesc(Comments::getUpdateDate);
 
         List<Comments> comments = commentsService.list(commentsLambdaQueryWrapper);
@@ -118,6 +139,9 @@ public class CommentsController {
             commentsDto.setPostsImage(imageUrl);
             commentsDto.setAccount(acc);
             commentsDto.setPostId(postId);
+            if (comment.getReplyToAccount() != null && !comment.getReplyToAccount().isBlank()) {
+                commentsDto.setReplyToName(userService.getUserName(comment.getReplyToAccount()));
+            }
 
             commentsDtos.add(commentsDto);
         }
@@ -141,6 +165,22 @@ public class CommentsController {
         comments.setIsRead(CommentsIsRead.yes);
         commentsService.update(comments ,commentsLambdaQueryWrapper);
         return R.success("comments is read");
+    }
+
+    @PutMapping("/{commentId}/read")
+    public R<String> markRead(HttpServletRequest request, @PathVariable String commentId) {
+        String currentAccount = (String) request.getAttribute(JwtAuthInterceptor.CURRENT_ACCOUNT);
+        Comments comment = commentsService.getById(commentId);
+        if (comment == null) {
+            return R.error("互动消息不存在");
+        }
+        Posts post = postsService.getById(comment.getPostsId());
+        if (post == null || !currentAccount.equals(post.getAccount())) {
+            return R.error("无权操作这条互动消息");
+        }
+        comment.setIsRead(CommentsIsRead.yes);
+        commentsService.updateById(comment);
+        return R.success("已读");
     }
 
 }

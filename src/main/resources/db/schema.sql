@@ -29,13 +29,21 @@ CREATE TABLE IF NOT EXISTS `comments` (
     `posts_id` VARCHAR(36) NOT NULL,
     `account` VARCHAR(36) NOT NULL,
     `text` TEXT NOT NULL,
+    `parent_id` VARCHAR(36) DEFAULT NULL,
+    `reply_to_account` VARCHAR(36) DEFAULT NULL,
     `update_date` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     `is_read` VARCHAR(3) NOT NULL DEFAULT 'no',
     `is_del` VARCHAR(3) NOT NULL DEFAULT 'no',
     PRIMARY KEY (`id`),
     KEY `idx_comments_posts` (`posts_id`),
+    KEY `idx_comments_parent` (`parent_id`),
     KEY `idx_comments_account_read` (`account`, `is_read`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+-- Existing installations can import these upgrades without losing comments.
+ALTER TABLE `comments` ADD COLUMN `parent_id` VARCHAR(36) DEFAULT NULL;
+ALTER TABLE `comments` ADD COLUMN `reply_to_account` VARCHAR(36) DEFAULT NULL;
+ALTER TABLE `comments` ADD INDEX `idx_comments_parent` (`parent_id`);
 
 CREATE TABLE IF NOT EXISTS `image` (
     `account` VARCHAR(36) NOT NULL,

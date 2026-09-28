@@ -1,6 +1,7 @@
 package com.ferry.bowall.config;
 
 import com.ferry.bowall.common.JacksonObjectMapper;
+import com.ferry.bowall.filter.JwtAuthInterceptor;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.info.Info;
 import lombok.extern.slf4j.Slf4j;
@@ -10,6 +11,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.converter.HttpMessageConverter;
 import org.springframework.http.converter.json.MappingJackson2HttpMessageConverter;
 import org.springframework.web.servlet.config.annotation.ResourceHandlerRegistry;
+import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 import java.util.List;
@@ -22,6 +24,12 @@ public class WebMvcConfig implements WebMvcConfigurer {
     @Value("${app.upload-dir:${user.dir}/uploads}")
     private String uploadDir;
 
+    private final JwtAuthInterceptor jwtAuthInterceptor;
+
+    public WebMvcConfig(JwtAuthInterceptor jwtAuthInterceptor) {
+        this.jwtAuthInterceptor = jwtAuthInterceptor;
+    }
+
 
     /**
      * 设置静态资源映射
@@ -32,6 +40,23 @@ public class WebMvcConfig implements WebMvcConfigurer {
         log.info("开始进行静态资源映射...");
         registry.addResourceHandler("/images/**")
                 .addResourceLocations(Path.of(uploadDir).toAbsolutePath().toUri().toString());
+    }
+
+    @Override
+    public void addInterceptors(InterceptorRegistry registry) {
+        registry.addInterceptor(jwtAuthInterceptor)
+                .addPathPatterns("/**")
+                .excludePathPatterns(
+                        "/",
+                        "/index.html",
+                        "/app.css",
+                        "/app.js",
+                        "/assets/**",
+                        "/images/**",
+                        "/user/login",
+                        "/myWebSocket",
+                        "/swagger-ui/**",
+                        "/v3/api-docs/**");
     }
 
     /**

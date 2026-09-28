@@ -17,4 +17,5 @@ public class PostsDto extends Posts {
     private List<Image> images = new ArrayList<>();
     private List<CommentsDto> comments = new ArrayList<>();
     private Integer isLike;
+    private Long likeCount;
 }

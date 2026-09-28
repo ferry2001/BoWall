@@ -67,6 +67,9 @@ public class PostsController {
             String commentUserAvatar = userService.getUserAvatar(comment.getAccount());
             commentsDto.setName(commentUserName);
             commentsDto.setUserAvatar(commentUserAvatar);
+            if (comment.getReplyToAccount() != null && !comment.getReplyToAccount().isBlank()) {
+                commentsDto.setReplyToName(userService.getUserName(comment.getReplyToAccount()));
+            }
 
             commentsDtos.add(commentsDto);
         }
@@ -79,6 +82,9 @@ public class PostsController {
         postsDto.setUpdateDate(post.getUpdateDate());
         postsDto.setImages(images);
         postsDto.setComments(commentsDtos);
+        LambdaQueryWrapper<Likes> likesCountWrapper = new LambdaQueryWrapper<>();
+        likesCountWrapper.eq(Likes::getPostId, post.getId());
+        postsDto.setLikeCount(likeService.count(likesCountWrapper));
 
         return R.success(postsDto);
     }
@@ -117,6 +123,9 @@ public class PostsController {
                 String commentUserAvatar = userService.getUserAvatar(comment.getAccount());
                 commentsDto.setName(commentUserName);
                 commentsDto.setUserAvatar(commentUserAvatar);
+                if (comment.getReplyToAccount() != null && !comment.getReplyToAccount().isBlank()) {
+                    commentsDto.setReplyToName(userService.getUserName(comment.getReplyToAccount()));
+                }
 
                 commentsDtos.add(commentsDto);
             }
@@ -138,6 +147,9 @@ public class PostsController {
             }else {
                 postsDto.setIsLike(1);
             }
+            LambdaQueryWrapper<Likes> likesCountWrapper = new LambdaQueryWrapper<>();
+            likesCountWrapper.eq(Likes::getPostId, post.getId());
+            postsDto.setLikeCount(likeService.count(likesCountWrapper));
             postsDtos.add(postsDto);
         }
 
@@ -215,6 +227,9 @@ public class PostsController {
             postsDto.setText(post.getText());
             postsDto.setUpdateDate(post.getUpdateDate());
             postsDto.setImages(images);
+            LambdaQueryWrapper<Likes> likesCountWrapper = new LambdaQueryWrapper<>();
+            likesCountWrapper.eq(Likes::getPostId, post.getId());
+            postsDto.setLikeCount(likeService.count(likesCountWrapper));
 
             postsDtos.add(postsDto);
         }
@@ -287,7 +302,7 @@ public class PostsController {
     }
 
     @DeleteMapping("/delete/{postId}")
-    public R<String> deletePost(@PathVariable String postId) {
+    public R<String> deletePost(@PathVariable String postId, @RequestParam String account) {
         LambdaQueryWrapper<Posts> postsLambdaQueryWrapper = new LambdaQueryWrapper<>();
         postsLambdaQueryWrapper.eq(Posts::getId, postId);
 
@@ -295,6 +310,9 @@ public class PostsController {
         Posts post = postsService.getOne(postsLambdaQueryWrapper);
         if (post == null) {
             return R.error("帖子不存在或已被删除");
+        }
+        if (!post.getAccount().equals(account)) {
+            return R.error("无权删除其他用户的动态");
         }
 
         // 删除帖子
@@ -305,10 +323,13 @@ public class PostsController {
             commentsLambdaQueryWrapper.eq(Comments::getPostsId, postId);
             commentsService.remove(commentsLambdaQueryWrapper);
 
+            LambdaQueryWrapper<Likes> likesLambdaQueryWrapper = new LambdaQueryWrapper<>();
+            likesLambdaQueryWrapper.eq(Likes::getPostId, postId);
+            likeService.remove(likesLambdaQueryWrapper);
+
             LambdaQueryWrapper<Image> imageLambdaQueryWrapper = new LambdaQueryWrapper<>();
             imageLambdaQueryWrapper.eq(Image::getPostsId,postId);
             imageService.remove(imageLambdaQueryWrapper);
-            // 请根据您的数据模型和业务逻辑来删除相关内容
             return R.success("帖子删除成功");
         } else {
             return R.error("帖子删除失败");

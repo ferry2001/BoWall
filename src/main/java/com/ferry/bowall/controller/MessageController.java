@@ -128,6 +128,11 @@ public class MessageController {
             });
         }
 
+        // 没有任何会话时，避免 MyBatis-Plus 生成非法 SQL：WHERE account IN ()。
+        if (accounts.isEmpty()) {
+            return R.success(new ArrayList<>());
+        }
+
         LambdaQueryWrapper<User> userLambdaQueryWrapper = new LambdaQueryWrapper<>();
         userLambdaQueryWrapper.in(User::getAccount, accounts);
         Map<String, User> users = userService.list(userLambdaQueryWrapper)
