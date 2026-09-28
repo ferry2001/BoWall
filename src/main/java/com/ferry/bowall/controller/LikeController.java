@@ -27,7 +27,8 @@ public class LikeController {
         String account = map.get("account").toString();
         String postId = map.get("postId").toString();
         LambdaQueryWrapper<Likes> likesLambdaQueryWrapper = new LambdaQueryWrapper<>();
-        likesLambdaQueryWrapper.eq(Likes::getPostId,postId);
+        likesLambdaQueryWrapper.eq(Likes::getPostId,postId)
+                .eq(Likes::getAccount, account);
         Likes likes = likeService.getOne(likesLambdaQueryWrapper);
         if (likes == null) {
             Likes like01 = new Likes();

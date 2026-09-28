@@ -14,6 +14,8 @@ public class Comments {
     private String postsId;
     private String account;
     private String text;
+    private String parentId;
+    private String replyToAccount;
     private LocalDateTime updateDate;
     private CommentsIsRead isRead;
     private CommentsIsDel isDel;

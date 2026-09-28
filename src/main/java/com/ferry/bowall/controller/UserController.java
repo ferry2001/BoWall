@@ -3,6 +3,8 @@ package com.ferry.bowall.controller;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.ferry.bowall.common.PinYin;
 import com.ferry.bowall.common.R;
+import com.ferry.bowall.common.JwtService;
+import com.ferry.bowall.filter.JwtAuthInterceptor;
 import com.ferry.bowall.entity.Fans;
 import com.ferry.bowall.entity.User;
 import com.ferry.bowall.service.FansService;
@@ -21,7 +23,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import jakarta.servlet.http.HttpServletRequest;
-import jakarta.servlet.http.HttpSession;
 import java.time.LocalDateTime;
 import java.util.*;
 
@@ -49,6 +50,9 @@ public class UserController {
     @Autowired
     private PinYin pinYin;
 
+    @Autowired
+    private JwtService jwtService;
+
     @GetMapping("/getUser")
     public R<User> getUser(String account) {
         User user = userService.getUser(account);
@@ -61,9 +65,19 @@ public class UserController {
     }
 
     @PostMapping("/add")
-    public R<String> add(@RequestBody Map map) {
+    public R<String> add(HttpServletRequest request, @RequestBody Map map) {
         String account = map.get("account").toString();
         String fansAccount = map.get("fansAccount").toString();
+        String currentAccount = (String) request.getAttribute(JwtAuthInterceptor.CURRENT_ACCOUNT);
+        if (!fansAccount.equals(currentAccount)) {
+            return R.error("无权操作其他用户的关注关系");
+        }
+        if (account.equals(fansAccount)) {
+            return R.error("不能关注自己");
+        }
+        if (userService.getUser(account) == null) {
+            return R.error("用户不存在");
+        }
         Fans isfan = fansService.isfan(account, fansAccount);
         if (isfan != null) {
             userService.deleteFanAndFollowUser(account, fansAccount);
@@ -76,7 +90,7 @@ public class UserController {
     }
 
     @PostMapping("/login")
-    public R<User> login(@RequestBody Map map, HttpSession session) {
+    public R<Map<String, Object>> login(@RequestBody Map map) {
         log.info(map.toString());
 
         //获取手机号
@@ -109,11 +123,10 @@ public class UserController {
                 user.setStatus(1);
                 userService.save(user);
             }
-            session.setAttribute("user", user.getAccount());
-
-//            //如果用户登录成功，删除 Redis 中缓存的验证码
-//            redisTemplate.delete(phone);
-            return R.success(user);
+            Map<String, Object> loginResult = new HashMap<>();
+            loginResult.put("token", jwtService.createToken(user.getAccount()));
+            loginResult.put("user", user);
+            return R.success(loginResult);
         }
         return R.error("登录失败");
     }
@@ -121,13 +134,24 @@ public class UserController {
 
     @PutMapping
     public R<String> update(HttpServletRequest request, @RequestBody User user) {
+        String currentAccount = (String) request.getAttribute(JwtAuthInterceptor.CURRENT_ACCOUNT);
+        if (!currentAccount.equals(user.getAccount())) {
+            return R.error("无权修改其他用户的资料");
+        }
         user.setUpdateTime(LocalDateTime.now());
         userService.updateUser(user);
         return R.success("用户信息修改成功");
     }
 
     @PostMapping(value = "/avatar", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public R<User> uploadAvatar(@RequestParam String account, @RequestParam("avatar") MultipartFile avatar) throws IOException {
+    public R<User> uploadAvatar(
+            HttpServletRequest request,
+            @RequestParam String account,
+            @RequestParam("avatar") MultipartFile avatar) throws IOException {
+        String currentAccount = (String) request.getAttribute(JwtAuthInterceptor.CURRENT_ACCOUNT);
+        if (!currentAccount.equals(account)) {
+            return R.error("无权修改其他用户的头像");
+        }
         if (avatar.isEmpty()) {
             return R.error("请选择头像图片");
         }

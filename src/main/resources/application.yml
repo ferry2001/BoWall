@@ -6,6 +6,18 @@ spring:
   application:
     #应用的名称，可选
     name: bowall
+  servlet:
+    multipart:
+      # 图片动态最多支持 9 张；放宽默认的 1MB / 10MB 限制。
+      max-file-size: 20MB
+      max-request-size: 100MB
+  sql:
+    init:
+      # schema.sql 中的 DDL 均为幂等操作；启动时确保回复评论所需列已经存在。
+      mode: always
+      schema-locations: classpath:db/schema.sql
+      # 旧版 MySQL 不支持 IF NOT EXISTS；重复执行的“已存在”DDL 错误可安全忽略。
+      continue-on-error: true
   datasource:
     type: com.alibaba.druid.pool.DruidDataSource
     driver-class-name: com.mysql.cj.jdbc.Driver
@@ -34,6 +46,11 @@ spring:
   cache:
     redis:
       time-to-live: 1800000 #设置缓存数据的过期时间
+app:
+  jwt:
+    # 生产环境必须通过 BOWALL_JWT_SECRET 配置一个随机的高强度密钥。
+    secret: ${BOWALL_JWT_SECRET:bowall-local-development-secret-change-before-production}
+    expires-hours: ${BOWALL_JWT_EXPIRES_HOURS:72}
 mybatis-plus:
   configuration:
     #在映射实体或者属性时，将数据库中表名和字段名中的下划线去掉，按照驼峰命名法映射

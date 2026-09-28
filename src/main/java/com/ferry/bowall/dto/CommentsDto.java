@@ -11,5 +11,6 @@ public class CommentsDto {
     private String postsImage;
     private String account;
     private String postId;
+    private String replyToName;
 
 }
