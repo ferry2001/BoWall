@@ -17,6 +17,8 @@ AI 社区模拟机器人（低成本版）
   export BOWALL_BASE=http://localhost:8080
   python tools/ai_community_bot.py --agents 5 --posts-per-agent 2 --comments-per-post 3
 
+  # 注册时 AI 自动编网名 + 从网络抓图上传头像（默认开启；--no-avatar 可跳过头像）
+
   # 先看计划，不发后端请求（仍会调用 LLM 生成人设）
   python tools/ai_community_bot.py --dry-run --agents 3
 
@@ -33,9 +35,50 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import urllib.parse
 import uuid
 
 BASE = os.environ.get("BOWALL_BASE", "http://localhost:8080")
+UA = {"User-Agent": "Mozilla/5.0 (compatible; AiCommunityBot/1.0)"}
+
+
+def http_download(url: str, timeout: int = 20) -> bytes:
+    """下载任意 URL 的二进制内容（用于抓取网络头像）。"""
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return resp.read()
+
+
+def http_multipart(method: str, path: str, fields: dict, file_field: str,
+                   filename: str, file_bytes: bytes, content_type: str, token=None):
+    """multipart/form-data 上传，对应后端 @RequestParam MultipartFile 接口。
+    fields: 普通表单字段；file_field: 文件字段名。"""
+    url = BASE + path
+    boundary = uuid.uuid4().hex
+    parts = []
+    for k, v in fields.items():
+        parts.append(f"--{boundary}\r\n"
+                     f'Content-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode("utf-8"))
+    parts.append((f"--{boundary}\r\n"
+                  f'Content-Disposition: form-data; name="{file_field}"; '
+                  f'filename="{filename}"\r\n'
+                  f"Content-Type: {content_type}\r\n\r\n").encode("utf-8"))
+    parts.append(file_bytes + b"\r\n")
+    parts.append(f"--{boundary}--\r\n".encode("utf-8"))
+    body = b"".join(parts)
+    headers = {"Content-Type": f"multipart/form-data; boundary={boundary}"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        print(f"  [upload] {method} {path} -> {e.code}: "
+              f"{e.read().decode('utf-8', 'ignore')[:200]}", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001
+        print(f"  [upload] {method} {path} -> {e}", file=sys.stderr)
+    return None
 
 # ---------------------------------------------------------------------------
 # LLM 接入层：OpenAI 兼容 chat/completions 协议
@@ -76,20 +119,73 @@ def llm_generate(prompt: str, max_retry: int = 3):
 # 人设 / 帖子 / 评论：全部由 LLM 实时生成（无本地兜底模板）
 # ---------------------------------------------------------------------------
 def gen_persona(idx: int) -> dict:
-    """让 LLM 生成一个拟真人设：昵称 + 简介。输出 JSON: {"nickname":..., "bio":...}"""
+    """让 LLM 生成一个拟真人设：昵称 + 简介 + 头像描述。
+    输出 JSON: {"nickname":..., "bio":..., "avatar_desc":...}"""
     p = (f"请为一个中文社交社区设计第{idx}个虚拟用户人设，要求像真实普通人："
-         f"一个 2~6 字的中文昵称（不要含'用户''测试'等字样），以及一句 10~20 字的个人简介"
-         f"（职业/爱好风格）。只输出 JSON：{{\"nickname\":\"...\",\"bio\":\"...\"}}")
+         f"一个 2~6 字的中文昵称（不要含'用户''测试'等字样），一句 10~20 字的个人简介"
+         f"（职业/爱好风格），以及一个与 Ta 气质匹配的头像图片英文描述"
+         f"（如 'smiling asian college girl with glasses, casual style'，用于在网络上搜索配图）。"
+         f"只输出 JSON：{{\"nickname\":\"...\",\"bio\":\"...\",\"avatar_desc\":\"...\"}}")
     raw = llm_generate(p) or ""
     raw = raw.strip().strip("`").removeprefix("json").strip()
     try:
         d = json.loads(raw[raw.find("{"):raw.rfind("}") + 1])
-        nick, bio = str(d["nickname"]).strip(), str(d["bio"]).strip()
+        nick = str(d["nickname"]).strip()
+        bio = str(d["bio"]).strip()
+        avatar_desc = str(d.get("avatar_desc", "")).strip()
         if nick and bio:
-            return {"nickname": nick[:20], "bio": bio[:50]}
+            return {"nickname": nick[:20], "bio": bio[:50], "avatar_desc": avatar_desc[:120]}
     except Exception:  # noqa: BLE001
         pass
     sys.exit(f"[致命] 人设生成失败或格式不对（无兜底模板）: {raw[:100]}")
+
+
+# ---------------------------------------------------------------------------
+# 网络头像：从公开免费头像源随机抓取一张真实图片并上传为账号头像
+#   - 使用纯图片直链服务（dicebear 生成风 / this-person-does-not-exist 真人风），
+#     避免 HTML 页面导致上传非图片文件被后端拒绝。
+#   - 下载失败时跳过该账号头像，不影响注册发帖主流程。
+# ---------------------------------------------------------------------------
+AVATAR_SOURCES = [
+    # dicebear：按 seed 生成的卡通头像，稳定、支持 png（路径格式 style/png/seed-xxx.png）
+    lambda seed, desc: (
+        "https://api.dicebear.com/9.x/lorelei/png/"
+        f"seed-{seed}.png?background=c7e3ee&radius=50"),
+    lambda seed, desc: (
+        "https://api.dicebear.com/9.x/avataaars/png/"
+        f"seed-{seed}.png?radius=50"),
+    lambda seed, desc: (
+        "https://api.dicebear.com/9.x/pixel-art/png/"
+        f"seed-{seed}.png?radius=50"),
+    # 真人风头像（存在可用性波动，失败自动换下一个源）
+    lambda seed, desc: (
+        "https://this-person-does-not-exist.com/api?"
+        f"gender={random.choice(['f', 'm'])}&age=18-40&_={seed}"),
+]
+
+
+def fetch_avatar(nickname: str, avatar_desc: str) -> tuple | None:
+    """尝试多个来源抓取一张头像图片，返回 (bytes, filename, content_type)；全部失败返回 None。"""
+    for make_url in AVATAR_SOURCES:
+        seed = uuid.uuid4().hex[:12]
+        url = make_url(seed, avatar_desc)
+        try:
+            data = http_download(url)
+        except Exception as e:  # noqa: BLE001
+            print(f"  [avatar] {nickname}: 下载失败({url[:60]}...) {e}", file=sys.stderr)
+            continue
+        # 校验魔数，确保拿到的是真图片而不是 HTML 错误页
+        if data[:3] == b"\xff\xd8\xff":
+            return data, f"{seed}.jpg", "image/jpeg"
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return data, f"{seed}.png", "image/png"
+        if data[:6] in (b"GIF87a", b"GIF89a"):
+            return data, f"{seed}.gif", "image/gif"
+        if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            return data, f"{seed}.webp", "image/webp"
+        print(f"  [avatar] {nickname}: 返回内容不是图片({url[:60]}...)，换下一源", file=sys.stderr)
+    print(f"  [avatar] {nickname}: 所有头像源均失败，跳过头像", file=sys.stderr)
+    return None
 
 
 def gen_text(kind: str, persona: dict) -> str:
@@ -177,9 +273,58 @@ def login_agent(state: dict, nickname: str, dry_run: bool):
     acc = {"phone": phone, "account": user.get("account"), "token": token, "nickname": nickname}
     state["accounts"][nickname] = acc
     save_state(state)
-    # 完善昵称（后端 PUT /user 校验 currentAccount == user.account）
-    http_json("PUT", "/user", {"account": acc["account"], "name": nickname}, token=token)
     return acc
+
+
+def setup_profile(acc: dict, persona: dict, state: dict, dry_run: bool) -> None:
+    """注册后完善资料：昵称/签名用 LLM 人设；头像优先复用已上传的 avatar URL，
+    否则从网络抓取一张图片，multipart 上传到 POST /user/avatar。
+    注意：后端 PUT /user 是全字段更新（name/sign/phone/avatar），
+    因此必须先 GET /user/getUser 取回完整记录再合并提交，避免把 phone/avatar 洗成 null。"""
+    if dry_run:
+        print(f"[dry] {acc['nickname']}: GET /user/getUser -> PUT /user(name,sign) -> "
+              f"POST /user/avatar(网络抓图上传)")
+        return
+    # 1. 取回当前完整用户记录
+    r = http_json("GET", "/user/getUser", params={"account": acc["account"]},
+                  token=acc["token"])
+    user = (r or {}).get("data") or {}
+    if not user.get("account"):
+        print(f"  [profile] {acc['nickname']}: 获取用户失败，跳过资料设置", file=sys.stderr)
+        return
+    # 2. 合并人设字段后整体更新（全字段 update）
+    payload = {
+        "account": user["account"],
+        "name": persona["nickname"],
+        "sign": persona["bio"],
+        "phone": user.get("phone"),
+        "address": user.get("address"),
+        "status": user.get("status"),
+        "avatar": user.get("avatar"),   # 先保留原值
+        "password": user.get("password"),
+    }
+    # 3. 头像：已有则复用（缓存账号不重复下载）；没有则从网络找图并上传
+    if not payload["avatar"]:
+        cached_avatar = state.setdefault("avatars", {}).get(persona["nickname"])
+        if cached_avatar:
+            payload["avatar"] = cached_avatar
+        else:
+            img = fetch_avatar(persona["nickname"], persona.get("avatar_desc", ""))
+            if img:
+                data, fname, ctype = img
+                up = http_multipart("POST", "/user/avatar",
+                                   fields={"account": acc["account"]},
+                                   file_field="avatar", filename=fname,
+                                   file_bytes=data, content_type=ctype,
+                                   token=acc["token"])
+                new_avatar = ((up or {}).get("data") or {}).get("avatar")
+                if new_avatar:
+                    payload["avatar"] = new_avatar
+                    state["avatars"][persona["nickname"]] = new_avatar
+                    print(f"[avatar] {acc['nickname']}: 上传成功 {new_avatar}")
+                else:
+                    print(f"[avatar] {acc['nickname']}: 上传失败，继续无头像注册", file=sys.stderr)
+    http_json("PUT", "/user", payload, token=acc["token"])
 
 
 # ---------------------------------------------------------------------------
@@ -246,6 +391,7 @@ def main() -> None:
     ap.add_argument("--comments-per-post", type=int, default=2, help="每条帖子评论数")
     ap.add_argument("--likes-per-post", type=int, default=2, help="每条帖子点赞数")
     ap.add_argument("--follow", action="store_true", help="让机器人之间互相关注")
+    ap.add_argument("--no-avatar", action="store_true", help="跳过网络头像抓取与上传")
     ap.add_argument("--interval", type=float, default=0.5, help="请求间隔秒数，防限流")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不发请求")
     args = ap.parse_args()
@@ -266,12 +412,16 @@ def main() -> None:
         else:
             state.setdefault("personas", {})[persona["nickname"]] = persona["bio"]
         personas.append(persona)
-        print(f"[persona] {persona['nickname']}：{persona['bio']}")
+        print(f"[persona] {persona['nickname']}：{persona['bio']}"
+              f"（头像描述: {persona.get('avatar_desc') or '无'}）")
 
     tokens = {}
     for p in personas:
         acc = login_agent(state, p["nickname"], args.dry_run)
         if acc:
+            # 注册成功后立即完善资料：昵称/签名 + 从网络找图上传头像
+            if not args.no_avatar or args.dry_run:
+                setup_profile(acc, p, state, args.dry_run if args.no_avatar else False)
             tokens[p["nickname"]] = acc
         time.sleep(args.interval)
 
