@@ -807,6 +807,46 @@ nav {
   border-radius: 18px;
   background: var(--paper);
 }
+.quality-modal .interaction-dialog {
+  max-width: 540px;
+}
+.quality-modal h2 {
+  margin: 0 0 4px;
+  font-size: 20px;
+}
+.quality-note {
+  margin: 0 0 16px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.quality-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.quality-grid > div {
+  display: grid;
+  gap: 3px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fffaf7;
+}
+.quality-grid small,
+.quality-method {
+  color: var(--muted);
+  font-size: 12px;
+}
+.quality-grid b {
+  color: var(--ink);
+  font-size: 18px;
+}
+.quality-method {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-top: 14px;
+}
 .modal-close {
   position: absolute;
   top: 10px;

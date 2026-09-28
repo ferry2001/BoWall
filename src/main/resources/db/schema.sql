@@ -27,6 +27,19 @@ CREATE TABLE IF NOT EXISTS `posts` (
 
 ALTER TABLE `posts` ADD COLUMN `view_count` BIGINT NOT NULL DEFAULT 0;
 
+CREATE TABLE IF NOT EXISTS `post_dwell` (
+    `id` VARCHAR(36) NOT NULL,
+    `post_id` VARCHAR(36) NOT NULL,
+    `account` VARCHAR(36) NOT NULL,
+    `session_id` VARCHAR(64) NOT NULL,
+    `dwell_seconds` BIGINT NOT NULL DEFAULT 0,
+    `update_date` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
+    PRIMARY KEY (`id`),
+    UNIQUE KEY `uk_post_dwell_session` (`post_id`, `account`, `session_id`),
+    KEY `idx_post_dwell_post` (`post_id`),
+    KEY `idx_post_dwell_account` (`account`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
 CREATE TABLE IF NOT EXISTS `comments` (
     `id` VARCHAR(36) NOT NULL,
     `posts_id` VARCHAR(36) NOT NULL,

@@ -10,6 +10,16 @@ const routes = [
 const initialHash = location.hash.slice(1) || "home";
 const initialProfile = initialHash.match(/^profile\/(.+)$/);
 const initialConnections = initialHash.match(/^connections\/(fans|following)\/(.+)$/);
+let dwellTrackingReady = false;
+const dwellSessionId = (() => {
+  const key = "bowall.dwell-session";
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+})();
 let state = {
   route: initialConnections ? "connections" : (initialProfile ? "profile" : initialHash),
   profileAccount: initialProfile ? decodeURIComponent(initialProfile[1]) : null,
@@ -118,7 +128,7 @@ async function home() {
         feed.innerHTML = empty("还没有动态", "成为第一个发布内容的人吧。");
       } else if (posts.length) {
         const banner = page === 1
-          ? `<section class="recommendation-note"><span>✦</span><div><b>为你推荐</b><small>根据你的关注、点赞和评论动态排序</small></div></section>`
+          ? `<section class="recommendation-note"><span>✦</span><div><b>为你推荐</b><small>综合阅读质量、互动反馈、关联度与新鲜度排序</small></div></section>`
           : "";
         feed.insertAdjacentHTML("beforeend", `${banner}${posts.map(postCard).join("")}`);
         observePostViews(feed);
@@ -670,6 +680,7 @@ function go(route) {
   render();
 }
 function render() {
+  if (dwellTrackingReady) stopAllDwellTracking(false, true);
   renderNav();
   refreshUnreadMessages();
   if (!state.user) return login();
@@ -700,6 +711,8 @@ document.addEventListener("click", (e) => {
   if (connectionsButton) openConnections(connectionsButton.dataset.connections, connectionsButton.dataset.connectionsAccount);
   const connectionFollow = e.target.closest("[data-connection-follow]");
   if (connectionFollow) toggleFollowInList(connectionFollow.dataset.connectionFollow);
+  const qualityButton = e.target.closest("[data-quality]");
+  if (qualityButton) showPostQuality(qualityButton.dataset.quality);
   const like = e.target.closest("[data-like]");
   if (like)
     api("/like", {
@@ -746,6 +759,20 @@ async function deletePost(postId) {
       // 例如从个人主页删除后，局部刷新当前主页即可，不改变路由。
       profile();
     }
+  } catch (error) {
+    toast(error.message);
+  }
+}
+
+async function showPostQuality(postId) {
+  try {
+    const quality = await api(`/posts/${encodeURIComponent(postId)}/quality`);
+    const metric = (label, value, suffix = "") => `<div><small>${label}</small><b>${Number(value || 0).toFixed(Number.isInteger(Number(value || 0)) ? 0 : 1)}${suffix}</b></div>`;
+    const modal = document.createElement("div");
+    modal.className = "interaction-modal quality-modal";
+    modal.innerHTML = `<section class="interaction-dialog"><button class="modal-close" aria-label="关闭">×</button><p class="eyebrow">帖子质量</p><h2>内容阅读表现</h2><p class="quality-note">这些指标会参与规则推荐评分；不使用机器学习，也不改变时间流回退能力。</p><div class="quality-grid">${metric("浏览次数", quality.viewCount)}${metric("有效阅读率", quality.effectiveReadRate, "%")}${metric("快速划走率", quality.quickSkipRate, "%")}${metric("平均停留", quality.averageDwellSeconds, " 秒")}${metric("中位停留", quality.medianDwellSeconds, " 秒")}${metric("点赞率", quality.likeRate, "%")}${metric("评论率", quality.commentRate, "%")}${metric("停留评分", quality.dwellScore, " 分")}</div><section class="quality-method"><span>预期停留 ${quality.expectedDwellSeconds} 秒</span><span>有效阅读 ≥ ${quality.effectiveReadThresholdSeconds} 秒</span><span>快速划走 &lt; ${quality.quickSkipThresholdSeconds} 秒</span><span>有效会话 ${quality.recordedSessionCount}</span></section></section>`;
+    document.body.append(modal);
+    modal.onclick = (event) => { if (event.target === modal || event.target.closest(".modal-close")) modal.remove(); };
   } catch (error) {
     toast(error.message);
   }
@@ -867,6 +894,7 @@ function postCard(post) {
           转发
         </button>
         <span class="post-views" data-post-views="${esc(post.id)}">◉ ${Number(post.viewCount || 0)} 浏览</span>
+        ${canDelete ? `<button data-quality="${post.id}">数据</button>` : ""}
         ${canDelete ? `<button class="danger" data-delete="${post.id}">删除</button>` : ""}
         ${imageList.length > 1 ? `<span class="image-count">${imageList.length} 张图片</span>` : ""}
       </div>
@@ -878,12 +906,99 @@ function postCard(post) {
     </article>`;
 }
 
+const DWELL_MINIMUM_MS = 1000;
+const DWELL_MAX_SEGMENT_MS = 5 * 60 * 1000;
+const DWELL_MAX_POST_SESSION_MS = 30 * 60 * 1000;
+const postDwellTrackers = new Map();
 let postViewObserver;
+let postDwellObserver;
+dwellTrackingReady = true;
+
+function trackerFor(postId) {
+  if (!postDwellTrackers.has(postId)) {
+    postDwellTrackers.set(postId, {
+      postId,
+      isIntersecting: false,
+      startedAt: null,
+      pendingMs: 0,
+      totalMs: 0,
+    });
+  }
+  return postDwellTrackers.get(postId);
+}
+
+function startDwellTracking(tracker) {
+  if (tracker.startedAt || !tracker.isIntersecting || document.visibilityState !== "visible") return;
+  if (tracker.totalMs >= DWELL_MAX_POST_SESSION_MS) return;
+  tracker.startedAt = performance.now();
+}
+
+function pauseDwellTracking(tracker, flush = true) {
+  if (tracker.startedAt !== null) {
+    const elapsed = Math.min(performance.now() - tracker.startedAt, DWELL_MAX_SEGMENT_MS);
+    const accepted = Math.min(elapsed, Math.max(0, DWELL_MAX_POST_SESSION_MS - tracker.totalMs));
+    tracker.pendingMs += accepted;
+    tracker.totalMs += accepted;
+    tracker.startedAt = null;
+  }
+  if (flush) flushDwellTracking(tracker);
+}
+
+function flushDwellTracking(tracker, keepalive = false) {
+  const seconds = Math.floor(tracker.pendingMs / 1000);
+  if (seconds < 1) return;
+  const sentMs = seconds * 1000;
+  const payload = JSON.stringify({ sessionId: dwellSessionId, seconds });
+  const path = `/posts/${encodeURIComponent(tracker.postId)}/dwell`;
+
+  // 在请求发出前先从待发送队列预扣，避免页面卸载时和在途请求重复累计同一段时间。
+  tracker.pendingMs -= sentMs;
+
+  if (keepalive) {
+    fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...(state.token ? { Authorization: `Bearer ${state.token}` } : {}) },
+      body: payload,
+      keepalive: true,
+    }).catch(() => {});
+    return;
+  }
+
+  api(path, { method: "POST", body: payload })
+    .catch(() => { tracker.pendingMs += sentMs; });
+}
+
+function stopAllDwellTracking(keepalive = false, resetVisibility = false) {
+  postDwellTrackers.forEach((tracker) => pauseDwellTracking(tracker, false));
+  postDwellTrackers.forEach((tracker) => flushDwellTracking(tracker, keepalive));
+  if (resetVisibility) {
+    postDwellTrackers.forEach((tracker) => { tracker.isIntersecting = false; });
+    postDwellObserver?.disconnect();
+  }
+}
+
+function observePostDwell(root = document) {
+  if (!("IntersectionObserver" in window)) return;
+  if (!postDwellObserver) {
+    postDwellObserver = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        const postId = entry.target.dataset.postId;
+        if (!postId) return;
+        const tracker = trackerFor(postId);
+        tracker.isIntersecting = entry.intersectionRatio >= 0.55;
+        if (tracker.isIntersecting) startDwellTracking(tracker);
+        else pauseDwellTracking(tracker);
+      });
+    }, { threshold: [0, 0.55] });
+  }
+  root.querySelectorAll("[data-post-id]").forEach((card) => postDwellObserver.observe(card));
+}
+
 function observePostViews(root = document) {
   if (!("IntersectionObserver" in window)) return;
   if (!postViewObserver) {
     postViewObserver = new IntersectionObserver((entries) => {
-      entries.filter((entry) => entry.isIntersecting).forEach((entry) => {
+      entries.filter((entry) => entry.intersectionRatio >= 0.55).forEach((entry) => {
         const card = entry.target;
         const postId = card.dataset.postId;
         postViewObserver.unobserve(card);
@@ -897,7 +1012,17 @@ function observePostViews(root = document) {
     }, { threshold: 0.55 });
   }
   root.querySelectorAll("[data-post-id]").forEach((card) => postViewObserver.observe(card));
+  observePostDwell(root);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden") {
+    stopAllDwellTracking();
+  } else {
+    postDwellTrackers.forEach((tracker) => startDwellTracking(tracker));
+  }
+});
+window.addEventListener("pagehide", () => stopAllDwellTracking(true));
 function previewImage(src) {
   const modal = document.createElement("div");
   modal.className = "lightbox";

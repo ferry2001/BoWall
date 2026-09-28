@@ -6,15 +6,21 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ferry.bowall.common.R;
 import com.ferry.bowall.dto.CommentsDto;
+import com.ferry.bowall.dto.PostQualityDto;
 import com.ferry.bowall.dto.PostsDto;
+import com.ferry.bowall.dto.RecommendationDetailDto;
 import com.ferry.bowall.entity.*;
+import com.ferry.bowall.enums.Comments.CommentsIsDel;
+import com.ferry.bowall.filter.JwtAuthInterceptor;
 import com.ferry.bowall.service.*;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -24,6 +30,10 @@ import java.util.UUID;
 @RestController
 @Slf4j
 public class PostsController {
+
+    private static final long MAX_DWELL_SECONDS_PER_REPORT = 300;
+    private static final long MAX_DWELL_SECONDS_PER_POST_SESSION = 1800;
+    private static final long MAX_DWELL_SECONDS_FOR_QUALITY = 300;
 
     @Autowired
     private PostsService postsService;
@@ -43,6 +53,12 @@ public class PostsController {
     @Autowired
     private FollowersService followersService;
 
+    @Autowired
+    private PostDwellService postDwellService;
+
+    @Autowired
+    private RecommendationScorer recommendationScorer;
+
     /**
      * 由前端在动态卡片进入视区时调用。浏览数只记录展示行为，前端会在单次页面会话中去重。
      */
@@ -54,6 +70,136 @@ public class PostsController {
                 .eq(Posts::getId, postId)
                 .setSql("view_count = COALESCE(view_count, 0) + 1"));
         return R.success((post.getViewCount() == null ? 0 : post.getViewCount()) + 1);
+    }
+
+    /**
+     * 将前端在“可视面积至少 55% 且页面处于前台”期间累计的停留时间写入当前会话。
+     * 每个上报片段最多五分钟，每条动态在同一会话最多计三十分钟，防止后台挂起等异常值污染统计。
+     */
+    @PostMapping("/{postId}/dwell")
+    public R<Long> recordDwell(HttpServletRequest request, @PathVariable String postId, @RequestBody Map<String, Object> payload) {
+        Posts post = postsService.getById(postId);
+        if (post == null) return R.error("动态不存在");
+
+        String account = (String) request.getAttribute(JwtAuthInterceptor.CURRENT_ACCOUNT);
+        String sessionId = String.valueOf(payload.getOrDefault("sessionId", "")).trim();
+        if (sessionId.isEmpty() || sessionId.length() > 64) return R.error("浏览会话无效");
+
+        long reportedSeconds;
+        try {
+            reportedSeconds = Long.parseLong(String.valueOf(payload.getOrDefault("seconds", 0)));
+        } catch (NumberFormatException exception) {
+            return R.error("停留时长无效");
+        }
+        if (reportedSeconds <= 0) return R.success(0L);
+        reportedSeconds = Math.min(reportedSeconds, MAX_DWELL_SECONDS_PER_REPORT);
+
+        LambdaQueryWrapper<PostDwell> query = new LambdaQueryWrapper<PostDwell>()
+                .eq(PostDwell::getPostId, postId)
+                .eq(PostDwell::getAccount, account)
+                .eq(PostDwell::getSessionId, sessionId);
+        PostDwell dwell = postDwellService.getOne(query);
+        if (dwell == null) {
+            dwell = new PostDwell();
+            dwell.setId(UUID.randomUUID().toString());
+            dwell.setPostId(postId);
+            dwell.setAccount(account);
+            dwell.setSessionId(sessionId);
+            dwell.setDwellSeconds(Math.min(reportedSeconds, MAX_DWELL_SECONDS_PER_POST_SESSION));
+            dwell.setUpdateDate(LocalDateTime.now());
+            postDwellService.save(dwell);
+        } else {
+            long currentSeconds = dwell.getDwellSeconds() == null ? 0 : dwell.getDwellSeconds();
+            long acceptedSeconds = Math.min(reportedSeconds, Math.max(0, MAX_DWELL_SECONDS_PER_POST_SESSION - currentSeconds));
+            if (acceptedSeconds > 0) {
+                dwell.setDwellSeconds(currentSeconds + acceptedSeconds);
+                dwell.setUpdateDate(LocalDateTime.now());
+                postDwellService.updateById(dwell);
+            }
+        }
+        return R.success(dwell.getDwellSeconds());
+    }
+
+    /**
+     * 质量指标只供动态作者查看。它读取浏览、停留、点赞和评论数据，但不会影响推荐排序。
+     */
+    @GetMapping("/{postId}/quality")
+    public R<PostQualityDto> quality(HttpServletRequest request, @PathVariable String postId) {
+        Posts post = postsService.getById(postId);
+        if (post == null) return R.error("动态不存在");
+        String currentAccount = (String) request.getAttribute(JwtAuthInterceptor.CURRENT_ACCOUNT);
+        if (!post.getAccount().equals(currentAccount)) return R.error("只能查看自己的动态数据");
+
+        return R.success(buildPostQuality(post));
+    }
+
+    private PostQualityDto buildPostQuality(Posts post) {
+        String postId = post.getId();
+        long imageCount = imageService.count(new LambdaQueryWrapper<Image>().eq(Image::getPostsId, postId));
+        long expectedSeconds = estimateExpectedDwellSeconds(post.getText(), imageCount);
+        long effectiveThreshold = Math.max(3, Math.round(expectedSeconds * 0.5));
+        long quickSkipThreshold = Math.min(5, Math.max(2, Math.round(expectedSeconds * 0.2)));
+        long qualityCap = Math.min(MAX_DWELL_SECONDS_FOR_QUALITY, Math.max(60, expectedSeconds * 3));
+
+        List<Long> recordedDwell = postDwellService.list(new LambdaQueryWrapper<PostDwell>()
+                        .eq(PostDwell::getPostId, postId))
+                .stream()
+                .map(item -> Math.min(item.getDwellSeconds() == null ? 0 : item.getDwellSeconds(), qualityCap))
+                .sorted()
+                .toList();
+
+        long storedViewCount = post.getViewCount() == null ? 0 : post.getViewCount();
+        long totalViews = Math.max(storedViewCount, recordedDwell.size());
+        long totalDwell = recordedDwell.stream().mapToLong(Long::longValue).sum();
+        long effectiveReads = recordedDwell.stream().filter(seconds -> seconds >= effectiveThreshold).count();
+        long zeroDwellViews = Math.max(0, totalViews - recordedDwell.size());
+        long quickSkips = zeroDwellViews + recordedDwell.stream().filter(seconds -> seconds < quickSkipThreshold).count();
+        long likeCount = likeService.count(new LambdaQueryWrapper<Likes>().eq(Likes::getPostId, postId));
+        long commentCount = commentsService.count(new LambdaQueryWrapper<Comments>()
+                .eq(Comments::getPostsId, postId)
+                .eq(Comments::getIsDel, CommentsIsDel.no));
+
+        PostQualityDto dto = new PostQualityDto();
+        dto.setPostId(postId);
+        dto.setViewCount(totalViews);
+        dto.setRecordedSessionCount((long) recordedDwell.size());
+        dto.setExpectedDwellSeconds(expectedSeconds);
+        dto.setEffectiveReadThresholdSeconds(effectiveThreshold);
+        dto.setQuickSkipThresholdSeconds(quickSkipThreshold);
+        dto.setEffectiveReadRate(percent(effectiveReads, totalViews));
+        dto.setQuickSkipRate(percent(quickSkips, totalViews));
+        dto.setAverageDwellSeconds(round(totalViews == 0 ? 0 : (double) totalDwell / totalViews));
+        dto.setMedianDwellSeconds(round(medianWithImplicitZero(recordedDwell, totalViews)));
+        dto.setLikeRate(percent(likeCount, totalViews));
+        dto.setCommentRate(percent(commentCount, totalViews));
+        dto.setDwellScore(round(Math.min(100, totalViews == 0 ? 0 : ((double) totalDwell / totalViews) / expectedSeconds * 100)));
+        return dto;
+    }
+
+    private long estimateExpectedDwellSeconds(String text, long imageCount) {
+        int characters = text == null ? 0 : text.codePointCount(0, text.length());
+        long textSeconds = (long) Math.ceil(characters / 12.0);
+        return Math.min(90, Math.max(3, 3 + textSeconds + imageCount * 4));
+    }
+
+    private double medianWithImplicitZero(List<Long> sortedDwell, long totalViews) {
+        if (totalViews <= 0) return 0;
+        long zeroCount = Math.max(0, totalViews - sortedDwell.size());
+        long left = valueAt(sortedDwell, zeroCount, (totalViews - 1) / 2);
+        long right = valueAt(sortedDwell, zeroCount, totalViews / 2);
+        return (left + right) / 2.0;
+    }
+
+    private long valueAt(List<Long> sortedDwell, long zeroCount, long index) {
+        return index < zeroCount ? 0 : sortedDwell.get((int) (index - zeroCount));
+    }
+
+    private double percent(long numerator, long denominator) {
+        return round(denominator == 0 ? 0 : Math.min(100, numerator * 100.0 / denominator));
+    }
+
+    private double round(double value) {
+        return Math.round(value * 10.0) / 10.0;
     }
 
     @GetMapping("getPostsById")
@@ -177,14 +323,15 @@ public class PostsController {
     }
 
     /**
-     * 首页推荐：优先推荐关注过、点赞过或评论过的作者发布的新动态。
-     * 没有足够互动记录时，排序自然退化为按发布时间倒序的公共动态流。
+     * 首页推荐：基于阅读质量、互动反馈、作者关联度和新鲜度的可解释规则评分。
+     * 传 mode=time 或修改配置即可回退为纯时间倒序。
      */
     @GetMapping("/recommendations")
     public R<List<PostsDto>> recommendations(
             @RequestParam String account,
             @RequestParam(defaultValue = "1") int page,
-            @RequestParam(defaultValue = "20") int size) {
+            @RequestParam(defaultValue = "20") int size,
+            @RequestParam(required = false) String mode) {
         int safePage = Math.max(page, 1);
         int safeSize = Math.min(Math.max(size, 1), 50);
         Map<String, Integer> authorAffinity = new java.util.HashMap<>();
@@ -218,20 +365,39 @@ public class PostsController {
             }
         }
 
-        // 多取一些候选后在内存中按亲和度排序，可避免推荐结果被单一作者占满。
+        // 多取一些候选后在内存中进行规则评分；异常时保留时间流作为兜底。
         LambdaQueryWrapper<Posts> candidateQuery = new LambdaQueryWrapper<>();
         candidateQuery.ne(Posts::getAccount, account)
                 .orderByDesc(Posts::getUpdateDate);
         List<Posts> candidates = postsService.page(new Page<>(1, 200), candidateQuery).getRecords();
-        candidates.sort((left, right) -> {
-            int affinityCompare = Integer.compare(
-                    authorAffinity.getOrDefault(right.getAccount(), 0),
-                    authorAffinity.getOrDefault(left.getAccount(), 0));
-            if (affinityCompare != 0) {
-                return affinityCompare;
+        Map<String, RecommendationDetailDto> scoreDetails = new java.util.HashMap<>();
+        boolean timeMode = recommendationScorer.useTimeMode(mode);
+        if (!timeMode) {
+            try {
+                for (Posts post : candidates) {
+                    scoreDetails.put(post.getId(), recommendationScorer.score(
+                            post, buildPostQuality(post), authorAffinity.getOrDefault(post.getAccount(), 0)));
+                }
+                candidates.sort((left, right) -> {
+                    int scoreCompare = Double.compare(
+                            scoreDetails.get(right.getId()).getTotalScore(), scoreDetails.get(left.getId()).getTotalScore());
+                    return scoreCompare != 0 ? scoreCompare : right.getUpdateDate().compareTo(left.getUpdateDate());
+                });
+            } catch (Exception exception) {
+                // 指标数据异常时，直接回退到时间流，首页仍可用。
+                log.warn("推荐评分失败，回退到时间排序", exception);
+                scoreDetails.clear();
+                timeMode = true;
             }
-            return right.getUpdateDate().compareTo(left.getUpdateDate());
-        });
+        }
+        if (timeMode) {
+            candidates.sort((left, right) -> right.getUpdateDate().compareTo(left.getUpdateDate()));
+        } else if (safePage == 1) {
+            candidates.stream().limit(5).forEach(post -> {
+                RecommendationDetailDto detail = scoreDetails.get(post.getId());
+                log.info("推荐明细 post={} score={} components={}", post.getId(), detail.getTotalScore(), detail.getComponents());
+            });
+        }
 
         int start = (safePage - 1) * safeSize;
         List<PostsDto> recommendations = new ArrayList<>();
@@ -273,6 +439,7 @@ public class PostsController {
             LambdaQueryWrapper<Likes> likeCountQuery = new LambdaQueryWrapper<>();
             likeCountQuery.eq(Likes::getPostId, post.getId());
             dto.setLikeCount(likeService.count(likeCountQuery));
+            dto.setRecommendation(scoreDetails.get(post.getId()));
             recommendations.add(dto);
         }
         return R.success(recommendations);

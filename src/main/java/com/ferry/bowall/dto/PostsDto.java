@@ -18,4 +18,5 @@ public class PostsDto extends Posts {
     private List<CommentsDto> comments = new ArrayList<>();
     private Integer isLike;
     private Long likeCount;
+    private RecommendationDetailDto recommendation;
 }

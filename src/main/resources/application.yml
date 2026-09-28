@@ -51,6 +51,20 @@ app:
     # 生产环境必须通过 BOWALL_JWT_SECRET 配置一个随机的高强度密钥。
     secret: ${BOWALL_JWT_SECRET:bowall-local-development-secret-change-before-production}
     expires-hours: ${BOWALL_JWT_EXPIRES_HOURS:72}
+  recommendation:
+    # mode 可设为 quality（规则评分）或 time（纯时间倒序，快速回退）。
+    default-mode: quality
+    smoothing-views: 12
+    freshness-half-life-hours: 36
+    exploration-weight: 0.05
+    weights:
+      dwell-quality: 0.27
+      effective-read: 0.18
+      like-rate: 0.12
+      comment-rate: 0.10
+      low-skip-rate: 0.12
+      freshness: 0.14
+      author-affinity: 0.07
 mybatis-plus:
   configuration:
     #在映射实体或者属性时，将数据库中表名和字段名中的下划线去掉，按照驼峰命名法映射
