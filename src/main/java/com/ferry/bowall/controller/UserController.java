@@ -25,6 +25,10 @@ import java.nio.file.StandardCopyOption;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.LocalDateTime;
 import java.util.*;
+import javax.imageio.ImageIO;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
 
 
 @RequestMapping("/user")
@@ -62,6 +66,19 @@ public class UserController {
             return R.error("用户不存在");
         }
 
+    }
+
+    /** 搜索页用户结果：账号与昵称均支持模糊匹配。 */
+    @GetMapping("/search")
+    public R<List<User>> search(@RequestParam String keyword) {
+        String value = keyword == null ? "" : keyword.trim();
+        if (value.isEmpty()) return R.success(Collections.emptyList());
+        LambdaQueryWrapper<User> query = new LambdaQueryWrapper<>();
+        query.like(User::getAccount, value)
+                .or()
+                .like(User::getName, value)
+                .last("LIMIT 30");
+        return R.success(userService.list(query));
     }
 
     @PostMapping("/add")
@@ -159,20 +176,37 @@ public class UserController {
         if (user == null) {
             return R.error("用户不存在");
         }
-
         String originalName = Optional.ofNullable(avatar.getOriginalFilename()).orElse("");
         int extensionStart = originalName.lastIndexOf('.') + 1;
-        String extension = extensionStart > 0 ? originalName.substring(extensionStart).toLowerCase(Locale.ROOT) : "";
+        String extension = extensionStart > 0
+                ? originalName.substring(extensionStart).toLowerCase(Locale.ROOT) : "";
         if (!IMAGE_EXTENSIONS.contains(extension)) {
-            return R.error("头像仅支持 JPG、PNG、GIF 或 WebP 图片");
+            return R.error("头像仅支持 JPG、PNG、GIF 或 WebP 格式");
         }
-
         Path directory = Path.of(uploadDir).toAbsolutePath();
         Files.createDirectories(directory);
-        String fileName = UUID.randomUUID() + "." + extension;
-        try (var input = avatar.getInputStream()) {
-            Files.copy(input, directory.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
+
+        // === 核心：读图 -> 中心裁剪成正方形 -> 缩放到 400x400 ===
+        BufferedImage original = ImageIO.read(avatar.getInputStream());
+        if (original == null) {
+            return R.error("无法读取图片内容");
         }
+        int w = original.getWidth(), h = original.getHeight();
+        int side = Math.min(w, h);
+        BufferedImage squared = original.getSubimage((w - side) / 2, (h - side) / 2, side, side);
+        boolean keepAlpha = "png".equals(extension);   // png 保留透明通道，避免黑底
+        BufferedImage out = new BufferedImage(400, 400,
+                keepAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB);
+        Graphics2D g2 = out.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g2.drawImage(squared, 0, 0, 400, 400, null);
+        g2.dispose();
+
+        // gif 只保留首帧，统一转 png；其余保持原格式
+        String finalExt = extension.equals("gif") ? "png" : extension;
+        String fileName = UUID.randomUUID() + "." + finalExt;
+        ImageIO.write(out, finalExt, directory.resolve(fileName).toFile());
 
         user.setAvatar("/images/" + fileName);
         userService.updateUser(user);

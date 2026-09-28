@@ -9,5 +9,6 @@ public class Posts {
     private String id;
     private String account;
     private String text;
+    private Long viewCount;
     private LocalDateTime updateDate;
 }

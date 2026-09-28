@@ -1,6 +1,7 @@
 package com.ferry.bowall.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.ferry.bowall.common.R;
@@ -42,6 +43,19 @@ public class PostsController {
     @Autowired
     private FollowersService followersService;
 
+    /**
+     * 由前端在动态卡片进入视区时调用。浏览数只记录展示行为，前端会在单次页面会话中去重。
+     */
+    @PostMapping("/{postId}/view")
+    public R<Long> recordView(@PathVariable String postId) {
+        Posts post = postsService.getById(postId);
+        if (post == null) return R.error("动态不存在");
+        postsService.update(new LambdaUpdateWrapper<Posts>()
+                .eq(Posts::getId, postId)
+                .setSql("view_count = COALESCE(view_count, 0) + 1"));
+        return R.success((post.getViewCount() == null ? 0 : post.getViewCount()) + 1);
+    }
+
     @GetMapping("getPostsById")
     public R<PostsDto> getPostsById(@RequestParam String postId) {
         LambdaQueryWrapper<Posts> postsLambdaQueryWrapper = new LambdaQueryWrapper<>();
@@ -82,6 +96,7 @@ public class PostsController {
         postsDto.setAccount(post.getAccount());
         postsDto.setId(post.getId());
         postsDto.setText(post.getText());
+        postsDto.setViewCount(post.getViewCount());
         postsDto.setUpdateDate(post.getUpdateDate());
         postsDto.setImages(images);
         postsDto.setComments(commentsDtos);
@@ -142,6 +157,7 @@ public class PostsController {
             postsDto.setAccount(post.getAccount());
             postsDto.setId(post.getId());
             postsDto.setText(post.getText());
+            postsDto.setViewCount(post.getViewCount());
             postsDto.setUpdateDate(post.getUpdateDate());
             postsDto.setImages(images);
             postsDto.setComments(commentsDtos);
@@ -228,6 +244,7 @@ public class PostsController {
             dto.setAccount(post.getAccount());
             dto.setId(post.getId());
             dto.setText(post.getText());
+            dto.setViewCount(post.getViewCount());
             dto.setUpdateDate(post.getUpdateDate());
             dto.setImages(imageService.list(imageQuery));
 
@@ -329,6 +346,7 @@ public class PostsController {
             postsDto.setAccount(post.getAccount());
             postsDto.setId(post.getId());
             postsDto.setText(post.getText());
+            postsDto.setViewCount(post.getViewCount());
             postsDto.setUpdateDate(post.getUpdateDate());
             postsDto.setImages(images);
             LambdaQueryWrapper<Likes> likesCountWrapper = new LambdaQueryWrapper<>();
@@ -392,6 +410,7 @@ public class PostsController {
             postsDto.setAccount(post.getAccount());
             postsDto.setId(post.getId());
             postsDto.setText(post.getText());
+            postsDto.setViewCount(post.getViewCount());
             postsDto.setUpdateDate(post.getUpdateDate());
             postsDto.setImages(images);
             if (account != null && !account.isBlank()) {

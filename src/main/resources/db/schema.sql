@@ -19,10 +19,13 @@ CREATE TABLE IF NOT EXISTS `posts` (
     `id` VARCHAR(36) NOT NULL,
     `account` VARCHAR(36) NOT NULL,
     `text` TEXT,
+    `view_count` BIGINT NOT NULL DEFAULT 0,
     `update_date` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (`id`),
     KEY `idx_posts_account_date` (`account`, `update_date` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+ALTER TABLE `posts` ADD COLUMN `view_count` BIGINT NOT NULL DEFAULT 0;
 
 CREATE TABLE IF NOT EXISTS `comments` (
     `id` VARCHAR(36) NOT NULL,
@@ -61,11 +64,14 @@ CREATE TABLE IF NOT EXISTS `likes` (
     `id` VARCHAR(36) NOT NULL,
     `account` VARCHAR(36) NOT NULL,
     `post_id` VARCHAR(36) NOT NULL,
+    `is_read` VARCHAR(3) NOT NULL DEFAULT 'no',
     `update_date` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (`id`),
     UNIQUE KEY `uk_likes_account_post` (`account`, `post_id`),
     KEY `idx_likes_post` (`post_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+
+ALTER TABLE `likes` ADD COLUMN `is_read` VARCHAR(3) NOT NULL DEFAULT 'no';
 
 CREATE TABLE IF NOT EXISTS `message` (
     `id` VARCHAR(36) NOT NULL,

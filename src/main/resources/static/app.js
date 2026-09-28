@@ -9,13 +9,16 @@ const routes = [
 ];
 const initialHash = location.hash.slice(1) || "home";
 const initialProfile = initialHash.match(/^profile\/(.+)$/);
+const initialConnections = initialHash.match(/^connections\/(fans|following)\/(.+)$/);
 let state = {
-  route: initialProfile ? "profile" : initialHash,
+  route: initialConnections ? "connections" : (initialProfile ? "profile" : initialHash),
   profileAccount: initialProfile ? decodeURIComponent(initialProfile[1]) : null,
+  connections: initialConnections ? { kind: initialConnections[1], account: decodeURIComponent(initialConnections[2]) } : null,
   user: JSON.parse(localStorage.getItem("bowall.user") || "null"),
   token: localStorage.getItem("bowall.token"),
   chat: null,
   unreadMessages: 0,
+  viewedPostIds: new Set(),
 };
 if (!state.token) state.user = null;
 const avatar = (user) =>
@@ -118,6 +121,7 @@ async function home() {
           ? `<section class="recommendation-note"><span>✦</span><div><b>为你推荐</b><small>根据你的关注、点赞和评论动态排序</small></div></section>`
           : "";
         feed.insertAdjacentHTML("beforeend", `${banner}${posts.map(postCard).join("")}`);
+        observePostViews(feed);
         page += 1;
       }
       hasMore = posts.length === pageSize;
@@ -207,12 +211,15 @@ async function discover() {
     const results = document.querySelector("#results");
     results.innerHTML = empty("正在搜索…", `正在查找“${esc(q)}”相关的动态。`);
     try {
-      const posts = await api(
-        `/posts/getPostsPages?page=1&size=30&inValue=${encodeURIComponent(q)}&account=${encodeURIComponent(state.user.account)}`,
-      );
-      results.innerHTML = posts.length
+      const [users, posts] = await Promise.all([
+        api(`/user/search?keyword=${encodeURIComponent(q)}`),
+        api(`/posts/getPostsPages?page=1&size=30&inValue=${encodeURIComponent(q)}&account=${encodeURIComponent(state.user.account)}`),
+      ]);
+      const userSection = users.length ? `<section class="card search-users"><div class="section-title"><b>用户</b><span>${users.length} 位</span></div><div class="search-user-list">${users.map((user) => `<button class="search-user" data-profile="${esc(user.account)}"><img class="avatar" src="${avatar(user)}" alt=""><span><b>${esc(user.name || user.account)}</b><small>ID：${esc(user.account)}</small><em>${esc(user.sign || "这个人还没有留下签名。")}</em></span><i>›</i></button>`).join("")}</div></section>` : "";
+      results.innerHTML = userSection + (posts.length
         ? `<p class="search-summary">找到 <b>${posts.length}</b> 条与“${esc(q)}”相关的动态</p><div class="feed search-feed">${posts.map(postCard).join("")}</div>`
-        : empty("没有找到相关动态", "试试用户 ID、昵称，或动态正文中的其他关键词。");
+        : (users.length ? "" : empty("没有找到相关动态", "试试用户 ID、昵称，或动态正文中的其他关键词。")));
+      observePostViews(results);
     } catch (e) {
       results.innerHTML = empty("搜索失败", esc(e.message));
     }
@@ -221,14 +228,30 @@ async function discover() {
 async function messages() {
   app.innerHTML = `<header class="page-head"><div><h1>消息</h1><p>和朋友聊聊最近的动态。</p></div></header><section class="card friends-panel"><div class="section-title"><b>互关好友</b><span id="friend-count">加载中…</span></div><div id="friend-list" class="friend-list"></div></section><section class="message-list conversation-list"><button id="interaction-entry" class="card interaction-entry"><span class="interaction-icon">♡</span><span><b>互动消息</b><small id="interaction-summary">正在加载评论与回复…</small></span><i id="interaction-badge" class="badge" hidden></i><span class="interaction-arrow">›</span></button><section id="interaction-feed" class="interaction-feed" hidden></section><div id="conversation-list">${empty("正在加载…", "")}</div></section>`;
   try {
-    const [friendGroups, list, commentNotifications] = await Promise.all([
+    const [friendGroups, list, commentNotifications, likeNotifications] = await Promise.all([
       api(`/user/friends?account=${encodeURIComponent(state.user.account)}`),
       api(`/message/notification?account=${encodeURIComponent(state.user.account)}`),
       api(`/comments/notification?account=${encodeURIComponent(state.user.account)}`).catch(() => []),
+      api(`/like/notification?account=${encodeURIComponent(state.user.account)}`).catch(() => []),
     ]);
-    const interactions = (commentNotifications || []).filter((item) => item.account !== state.user.account);
+    const interactions = [
+      ...(commentNotifications || []).filter((item) => item.account !== state.user.account).map((item) => ({
+        kind: "comment", id: item.comments?.id, postId: item.postId, account: item.account,
+        name: item.name, userAvatar: item.userAvatar, postsImage: item.postsImage,
+        text: item.comments?.text, updateDate: item.comments?.updateDate, isRead: item.comments?.isRead,
+        replyToName: item.replyToName,
+      })),
+      ...(likeNotifications || []).map((item) => ({
+        kind: "like", id: item.like?.id, postId: item.postId, account: item.account,
+        name: item.name, userAvatar: item.userAvatar, postsImage: item.postsImage,
+        updateDate: item.like?.updateDate, isRead: item.like?.isRead,
+      })),
+    ].filter((item) => item.id && item.postId).sort((a, b) => new Date(b.updateDate || 0) - new Date(a.updateDate || 0));
     updateInteractionSummary(interactions);
-    document.querySelector("#interaction-entry").onclick = () => showInteractions(interactions);
+    document.querySelector("#interaction-entry").onclick = async () => {
+      await markInteractionsRead(interactions);
+      showInteractions(interactions);
+    };
     const friends = Object.values(friendGroups || {})
       .flat()
       .filter((user) => user && user.account !== state.user.account)
@@ -261,40 +284,54 @@ function showInteractions(interactions) {
   feed.hidden = !feed.hidden;
   if (feed.hidden) return;
   feed.innerHTML = interactions.length ? interactions.map((item) => {
-    const comment = item.comments || {};
-    const action = item.replyToName ? `回复了 ${esc(item.replyToName)}` : "评论了你的动态";
-    return `<button class="card interaction-row" data-interaction-post="${esc(item.postId)}" data-interaction-comment="${esc(comment.id)}"><img class="avatar" src="${avatar({ avatar: item.userAvatar, name: item.name })}" alt=""><span><b>${esc(item.name || "用户")}</b><small>${action} · ${formatPostTime(comment.updateDate)}</small><em>${esc(comment.text)}</em></span>${item.postsImage ? `<img class="interaction-cover" src="${esc(item.postsImage)}" alt="动态图片">` : ""}</button>`;
+    const action = item.kind === "like" ? "赞了你的动态" : (item.replyToName ? `回复了 ${esc(item.replyToName)}` : "评论了你的动态");
+    const content = item.kind === "like" ? "♡ 点赞了这条动态" : item.text;
+    return `<button class="card interaction-row" data-interaction-post="${esc(item.postId)}" data-interaction-id="${esc(item.id)}" data-interaction-kind="${item.kind}"><img class="avatar" src="${avatar({ avatar: item.userAvatar, name: item.name })}" alt=""><span><b>${esc(item.name || "用户")}</b><small>${action} · ${formatPostTime(item.updateDate)}</small><em>${esc(content)}</em></span>${item.postsImage ? `<img class="interaction-cover" src="${esc(item.postsImage)}" alt="动态图片">` : ""}</button>`;
   }).join("") : empty("暂无互动消息", "收到评论或回复后会显示在这里。");
   feed.querySelectorAll("[data-interaction-post]").forEach((button) => {
     button.onclick = async () => {
-      const commentId = button.dataset.interactionComment;
+      const interactionId = button.dataset.interactionId;
+      const kind = button.dataset.interactionKind;
       try {
-        await api(`/comments/${encodeURIComponent(commentId)}/read`, { method: "PUT" });
-        const interaction = interactions.find((item) => item.comments?.id === commentId);
-        if (interaction?.comments) interaction.comments.isRead = "yes";
+        await api(`/${kind === "like" ? "like" : "comments"}/${encodeURIComponent(interactionId)}/read`, { method: "PUT" });
+        const interaction = interactions.find((item) => item.id === interactionId);
+        if (interaction) interaction.isRead = "yes";
         updateInteractionSummary(interactions);
       } catch (error) {
         toast(error.message);
       }
-      showInteractionDetail(button.dataset.interactionPost, commentId);
+      showInteractionDetail(button.dataset.interactionPost, interactionId, kind);
     };
   });
+}
+
+async function markInteractionsRead(interactions) {
+  const unread = interactions.filter((item) => item.isRead !== "yes");
+  if (!unread.length) return;
+  const results = await Promise.allSettled(unread.map((item) =>
+    api(`/${item.kind === "like" ? "like" : "comments"}/${encodeURIComponent(item.id)}/read`, { method: "PUT" }),
+  ));
+  results.forEach((result, index) => {
+    if (result.status === "fulfilled") unread[index].isRead = "yes";
+  });
+  updateInteractionSummary(interactions);
 }
 
 function updateInteractionSummary(interactions) {
   const summary = document.querySelector("#interaction-summary");
   const badge = document.querySelector("#interaction-badge");
   if (!summary || !badge) return;
-  const unread = interactions.filter((item) => item.comments?.isRead !== "yes").length;
+  const unread = interactions.filter((item) => item.isRead !== "yes").length;
   summary.textContent = interactions.length ? `${interactions.length} 条评论或回复` : "暂无互动消息";
+  if (interactions.length) summary.textContent = `${interactions.length} 条互动消息`;
   badge.hidden = !unread;
-  badge.textContent = unread > 99 ? "99+" : unread;
+  badge.textContent = "";
 }
 
-async function showInteractionDetail(postId, commentId) {
+async function showInteractionDetail(postId, interactionId, kind = "comment") {
   try {
     const post = await api(`/posts/getPostsById?postId=${encodeURIComponent(postId)}`);
-    const commentDto = (post.comments || []).find((item) => item.comments?.id === commentId);
+    const commentDto = kind === "comment" ? (post.comments || []).find((item) => item.comments?.id === interactionId) : null;
     const comment = commentDto?.comments;
     const modal = document.createElement("div");
     modal.className = "interaction-modal";
@@ -335,10 +372,11 @@ async function profile(account = state.profileAccount || state.user.account) {
     ]);
     document.querySelector(".profile-top").innerHTML = `<img class="avatar" src="${avatar(u)}" alt="${esc(u.name || "用户")}的头像"><div><h1>${esc(u.name || u.account)}</h1><p>${esc(u.sign || "这个人还没有留下签名。")}</p></div>`;
     document.querySelector("#stats").innerHTML =
-      `<span><b>${p}</b>动态</span><span><b>${f}</b>粉丝</span><span><b>${fo}</b>关注</span>`;
+      `<span><b>${p}</b>动态</span><button class="stat-link" data-connections="fans" data-connections-account="${esc(account)}"><b>${f}</b>粉丝</button><button class="stat-link" data-connections="following" data-connections-account="${esc(account)}"><b>${fo}</b>关注</button>`;
     document.querySelector("#mine").innerHTML = posts.length
       ? posts.map((post) => postCard({ ...post, user: u })).join("")
       : empty(isMine ? "你还没有动态" : "TA 还没有动态", isMine ? "发布第一条动态，让大家认识你。" : "晚点再来看看吧。");
+    observePostViews(document.querySelector("#mine"));
     const actions = document.querySelector("#profile-actions");
     if (isMine) {
       actions.innerHTML = `<button id="edit-profile" class="primary">编辑主页</button>`;
@@ -356,6 +394,43 @@ async function profile(account = state.profileAccount || state.user.account) {
     }
   } catch (e) {
     document.querySelector("#mine").innerHTML = empty("主页加载失败", esc(e.message));
+  }
+}
+
+function openConnections(kind, account) {
+  state.connections = { kind, account };
+  state.profileAccount = null;
+  state.route = "connections";
+  location.hash = `connections/${kind}/${encodeURIComponent(account)}`;
+  render();
+}
+
+async function connections() {
+  const current = state.connections || { kind: "fans", account: state.user.account };
+  const isFans = current.kind === "fans";
+  const title = isFans ? "粉丝" : "关注";
+  app.innerHTML = `<header class="page-head list-page-head"><button class="quiet back-button" data-route="profile" aria-label="返回主页">‹</button><div><h1>${title}</h1><p>正在加载${title}列表…</p></div></header><section id="connection-list" class="card connection-list">${empty("正在加载…", "")}</section>`;
+  try {
+    const users = await api(`/${isFans ? "fans/getFans" : "followers/getFollowers"}?account=${encodeURIComponent(current.account)}`);
+    const relations = await Promise.all((users || []).filter(Boolean).map(async (user) => ({
+      user,
+      following: user.account === state.user.account ? true : Boolean(await api(`/fans/isfan?account=${encodeURIComponent(user.account)}&fansAccount=${encodeURIComponent(state.user.account)}`)),
+    })));
+    const list = document.querySelector("#connection-list");
+    const subject = await api(`/user/getUser?account=${encodeURIComponent(current.account)}`);
+    document.querySelector(".list-page-head p").textContent = current.account === state.user.account ? `共 ${relations.length} 人` : `${subject.name || "TA"} 的${title} · 共 ${relations.length} 人`;
+    list.innerHTML = relations.length ? relations.map(({ user, following }) => `<article class="connection-row"><button class="profile-link connection-person" data-profile="${esc(user.account)}"><img class="avatar" src="${avatar(user)}" alt=""><span><b>${esc(user.name || user.account)}</b><small>${esc(user.sign || "这个人还没有留下签名。")}</small></span></button>${user.account === state.user.account ? "" : `<button class="connection-follow ${following ? "following" : ""}" data-connection-follow="${esc(user.account)}">${following ? "已关注" : "关注"}</button>`}</article>`).join("") : empty(`暂无${title}`, isFans ? "还没有人关注这里。" : "还没有关注任何人。 ");
+  } catch (error) {
+    document.querySelector("#connection-list").innerHTML = empty("列表加载失败", esc(error.message));
+  }
+}
+
+async function toggleFollowInList(account) {
+  try {
+    await api("/user/add", { method: "POST", body: JSON.stringify({ account, fansAccount: state.user.account }) });
+    connections();
+  } catch (error) {
+    toast(error.message);
   }
 }
 
@@ -589,6 +664,7 @@ function login() {
 }
 function go(route) {
   if (route !== "profile") state.profileAccount = null;
+  if (route !== "connections") state.connections = null;
   state.route = route;
   location.hash = route;
   render();
@@ -602,6 +678,7 @@ function render() {
   else if (state.route === "compose") compose();
   else if (state.route === "messages") messages();
   else if (state.route === "profile") profile();
+  else if (state.route === "connections") connections();
   else if (state.route === "chat") chat(state.chat.account, state.chat.name);
   else home();
 }
@@ -619,6 +696,10 @@ document.addEventListener("click", (e) => {
   }
   const profileButton = e.target.closest("[data-profile]");
   if (profileButton) openProfile(profileButton.dataset.profile);
+  const connectionsButton = e.target.closest("[data-connections]");
+  if (connectionsButton) openConnections(connectionsButton.dataset.connections, connectionsButton.dataset.connectionsAccount);
+  const connectionFollow = e.target.closest("[data-connection-follow]");
+  if (connectionFollow) toggleFollowInList(connectionFollow.dataset.connectionFollow);
   const like = e.target.closest("[data-like]");
   if (like)
     api("/like", {
@@ -680,8 +761,10 @@ document.querySelector("#logout").onclick = () => {
 window.addEventListener("hashchange", () => {
   const hash = location.hash.slice(1) || "home";
   const profileMatch = hash.match(/^profile\/(.+)$/);
+  const connectionsMatch = hash.match(/^connections\/(fans|following)\/(.+)$/);
   state.profileAccount = profileMatch ? decodeURIComponent(profileMatch[1]) : null;
-  state.route = profileMatch ? "profile" : hash;
+  state.connections = connectionsMatch ? { kind: connectionsMatch[1], account: decodeURIComponent(connectionsMatch[2]) } : null;
+  state.route = connectionsMatch ? "connections" : (profileMatch ? "profile" : hash);
   render();
 });
 render();
@@ -760,7 +843,7 @@ function postCard(post) {
   const canDelete = post.account === state.user.account;
 
   return `
-    <article class="card post">
+    <article class="card post" data-post-id="${esc(post.id)}">
       <div class="post-top">
         <button class="profile-link" data-profile="${esc(user.account || post.account)}"><img class="avatar" src="${avatar(user)}" alt="查看 ${esc(user.name || user.account || "用户")} 的主页"></button>
         <div>
@@ -783,6 +866,7 @@ function postCard(post) {
           <img class="action-icon" src="/assets/interact/forward.png" alt="">
           转发
         </button>
+        <span class="post-views" data-post-views="${esc(post.id)}">◉ ${Number(post.viewCount || 0)} 浏览</span>
         ${canDelete ? `<button class="danger" data-delete="${post.id}">删除</button>` : ""}
         ${imageList.length > 1 ? `<span class="image-count">${imageList.length} 张图片</span>` : ""}
       </div>
@@ -792,6 +876,27 @@ function postCard(post) {
       </form>
       ${comments ? `<div class="comments">${comments}</div>` : ""}
     </article>`;
+}
+
+let postViewObserver;
+function observePostViews(root = document) {
+  if (!("IntersectionObserver" in window)) return;
+  if (!postViewObserver) {
+    postViewObserver = new IntersectionObserver((entries) => {
+      entries.filter((entry) => entry.isIntersecting).forEach((entry) => {
+        const card = entry.target;
+        const postId = card.dataset.postId;
+        postViewObserver.unobserve(card);
+        if (!postId || state.viewedPostIds.has(postId)) return;
+        state.viewedPostIds.add(postId);
+        api(`/posts/${encodeURIComponent(postId)}/view`, { method: "POST" }).then((count) => {
+          const label = document.querySelector(`[data-post-views="${CSS.escape(postId)}"]`);
+          if (label) label.textContent = `◉ ${Number(count || 0)} 浏览`;
+        }).catch(() => {});
+      });
+    }, { threshold: 0.55 });
+  }
+  root.querySelectorAll("[data-post-id]").forEach((card) => postViewObserver.observe(card));
 }
 function previewImage(src) {
   const modal = document.createElement("div");
