@@ -125,18 +125,25 @@ def gen_text(kind: str, persona: dict) -> str:
 # ---------------------------------------------------------------------------
 # BoWall HTTP 层
 # ---------------------------------------------------------------------------
-def http_json(method: str, path: str, body=None, token=None):
+class ApiError(Exception):
+    """后端返回 code != 1（R.error）时抛出。"""
+
+
+def http_json(method: str, path: str, body=None, token=None, params=None, raise_on_error=False):
+    """调用 BoWall 后端。鉴权：JwtAuthInterceptor 读取 Authorization: Bearer <token>。
+    R 结构：code==1 成功；code==0 失败（msg 为错误信息）。"""
     url = BASE + path
+    if params:
+        from urllib.parse import urlencode
+        url += ("&" if "?" in url else "?") + urlencode(params)
     data = json.dumps(body).encode("utf-8") if body is not None else None
     headers = {"Content-Type": "application/json"}
     if token:
-        # 若后端 JwtAuthInterceptor 使用其它头名（如 token），在此处一并调整
         headers["Authorization"] = f"Bearer {token}"
-        headers["token"] = token
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
-            return json.loads(resp.read().decode("utf-8"))
+            r = json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
         print(f"  [http] {method} {path} -> {e.code}: "
               f"{e.read().decode('utf-8', 'ignore')[:200]}", file=sys.stderr)
@@ -144,6 +151,12 @@ def http_json(method: str, path: str, body=None, token=None):
     except Exception as e:  # noqa: BLE001
         print(f"  [http] {method} {path} -> {e}", file=sys.stderr)
         return None
+    if isinstance(r, dict) and r.get("code") not in (1, None):
+        msg = r.get("msg")
+        if raise_on_error:
+            raise ApiError(f"{method} {path}: {msg}")
+        print(f"  [api] {method} {path} -> code={r.get('code')} msg={msg}", file=sys.stderr)
+    return r
 
 
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_state.json")
@@ -181,9 +194,67 @@ def login_agent(state: dict, nickname: str, dry_run: bool):
         return None
     acc = {"phone": phone, "account": user.get("account"), "token": token, "nickname": nickname}
     state["accounts"][nickname] = acc
-    # 完善昵称/简介
+    save_state(state)
+    # 完善昵称（后端 PUT /user 校验 currentAccount == user.account）
     http_json("PUT", "/user", {"account": acc["account"], "name": nickname}, token=token)
     return acc
+
+
+# ---------------------------------------------------------------------------
+# 社交动作：发帖 / 评论 / 点赞 / 关注（接口参数均已对照后端 Controller 源码）
+# ---------------------------------------------------------------------------
+def create_post(acc: dict, text: str, dry_run: bool):
+    """POST /posts/post  body={"account","text"} -> data 即新帖子 postId"""
+    if dry_run:
+        print(f"[dry] {acc['nickname']} 发帖: {text[:50]}")
+        return "dry-post-id"
+    r = http_json("POST", "/posts/post", {"account": acc["account"], "text": text},
+                  token=acc["token"])
+    if r and r.get("code") == 1:
+        pid = r.get("data")  # 后端返回 UUID 字符串
+        print(f"[post] {acc['nickname']}: OK id={pid} - {text[:30]}")
+        return pid
+    print(f"[post] {acc['nickname']}: FAIL - {text[:30]}")
+    return None
+
+
+def comment_post(acc: dict, post_id: str, text: str, target_account: str, dry_run: bool):
+    """POST /comments/post  body={"postsId","account","comments","parentId","replyToAccount"}"""
+    if dry_run:
+        print(f"[dry] {acc['nickname']} 评论 {post_id[:8]}: {text[:40]}")
+        return True
+    r = http_json("POST", "/comments/post",
+                  {"postsId": post_id, "account": acc["account"], "comments": text,
+                   "parentId": "", "replyToAccount": target_account or ""},
+                  token=acc["token"])
+    ok = bool(r) and r.get("code") == 1
+    print(f"[comment] {acc['nickname']}: {'OK' if ok else 'FAIL'} - {text[:20]}")
+    return ok
+
+
+def like_post(acc: dict, post_id: str, dry_run: bool):
+    """POST /like  body={"account","postId"}（重复调用会取消点赞，所以只点一次）"""
+    if dry_run:
+        print(f"[dry] {acc['nickname']} 点赞 {post_id[:8]}")
+        return True
+    r = http_json("POST", "/like", {"account": acc["account"], "postId": post_id},
+                  token=acc["token"])
+    ok = bool(r) and r.get("code") == 1
+    print(f"[like] {acc['nickname']}: {'OK' if ok else 'FAIL'} {post_id[:8]}")
+    return ok
+
+
+def follow(from_acc: dict, to_acc: dict, dry_run: bool):
+    """POST /user/add  body={"account":被关注人,"fansAccount":操作者}，必须用操作者的 token"""
+    if dry_run:
+        print(f"[dry] {from_acc['nickname']} 关注 {to_acc['nickname']}")
+        return True
+    r = http_json("POST", "/user/add",
+                  {"account": to_acc["account"], "fansAccount": from_acc["account"]},
+                  token=from_acc["token"])
+    ok = bool(r) and r.get("code") == 1
+    print(f"[follow] {from_acc['nickname']} -> {to_acc['nickname']}: {'OK' if ok else 'FAIL'}")
+    return ok
 
 
 def main() -> None:
@@ -191,9 +262,17 @@ def main() -> None:
     ap.add_argument("--agents", type=int, default=3, help="模拟用户数")
     ap.add_argument("--posts-per-agent", type=int, default=1, help="每个用户发帖数")
     ap.add_argument("--comments-per-post", type=int, default=2, help="每条帖子评论数")
+    ap.add_argument("--likes-per-post", type=int, default=2, help="每条帖子点赞数")
+    ap.add_argument("--follow", action="store_true", help="让机器人之间互相关注")
     ap.add_argument("--interval", type=float, default=0.5, help="请求间隔秒数，防限流")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不发请求")
     args = ap.parse_args()
+
+    if LLM_KEY:
+        print(f"[llm] 使用模型 {LLM_MODEL} @ {LLM_URL}")
+    else:
+        print("[llm] 未配置 BOT_LLM_KEY，使用本地模板（0 成本）。"
+              "接 DeepSeek: export BOT_LLM_KEY=sk-xxx")
 
     state = load_state()
     nicknames = random.sample(NAMES, min(args.agents, len(NAMES)))
@@ -206,6 +285,16 @@ def main() -> None:
             tokens[p["nickname"]] = acc
         time.sleep(args.interval)
 
+    # 互相关注，形成社交关系网
+    if args.follow and len(tokens) >= 2:
+        accs = list(tokens.values())
+        for a in accs:
+            for b in accs:
+                if a is not b:
+                    follow(a, b, args.dry_run)
+                    time.sleep(args.interval)
+
+    # 发帖：记录 (postId, 作者account, 正文)，供后续互动
     posted = []
     for p in personas:
         acc = tokens.get(p["nickname"])
@@ -213,35 +302,30 @@ def main() -> None:
             continue
         for _ in range(args.posts_per_agent):
             content = gen_text("post", p)
-            if args.dry_run:
-                print(f"[dry] {p['nickname']} 发帖: {content[:40]}...")
-                posted.append((acc, content))
-                continue
-            r = http_json("POST", "/posts/post",
-                          {"account": acc["account"], "content": content}, token=acc["token"])
-            print(f"[post] {p['nickname']}: {'OK' if r else 'FAIL'} - {content[:30]}")
-            if r:
-                posted.append((acc, content))
+            pid = create_post(acc, content, args.dry_run)
+            if pid:
+                posted.append({"postId": pid, "account": acc["account"],
+                               "text": content, "author": acc})
             time.sleep(args.interval)
 
-    commenters = list(tokens.values())
-    if args.comments_per_post > 0 and commenters:
-        for _, content in posted:
-            commenter = random.choice(commenters)
-            for _ in range(args.comments_per_post):
-                c = gen_text("comment", {**commenter, "target": content})
-                if args.dry_run:
-                    print(f"[dry] {commenter['nickname']} 评论: {c[:30]}...")
-                    continue
-                # 评论接口为 POST /comments/post，postId 需按实际帖子 ID 补充
-                r = http_json("POST", "/comments/post",
-                              {"account": commenter["account"], "content": c, "postId": None},
-                              token=commenter["token"])
-                print(f"[comment] {commenter['nickname']}: {'OK' if r else 'FAIL'} - {c[:20]}")
-                time.sleep(args.interval)
+    # 互动：其他账号对帖子点赞 + 评论
+    others = [a for a in tokens.values()]
+    for post in posted:
+        pool = [a for a in others if a["account"] != post["account"]] or others
+        # 点赞（每人每帖只点一次，避免 toggle 取消）
+        for liker in random.sample(pool, min(args.likes_per_post, len(pool))):
+            like_post(liker, post["postId"], args.dry_run)
+            time.sleep(args.interval)
+        # 评论
+        for _ in range(args.comments_per_post):
+            commenter = random.choice(pool)
+            text = gen_text("comment", {**commenter, "target": post["text"]})
+            comment_post(commenter, post["postId"], text, post["account"], args.dry_run)
+            time.sleep(args.interval)
 
     save_state(state)
-    print("完成。账号信息缓存在 tools/bot_state.json，下次运行不会重复注册。")
+    print(f"完成：{len(tokens)} 个账号，{len(posted)} 条帖子。"
+          f"账号缓存在 tools/bot_state.json，下次运行不会重复注册。")
 
 
 if __name__ == "__main__":
