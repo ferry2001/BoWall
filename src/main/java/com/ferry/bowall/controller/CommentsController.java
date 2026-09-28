@@ -70,7 +70,8 @@ public class CommentsController {
 
         commentsService.save(comments);
 
-        return R.success("发送成功");
+        // 返回评论 ID，前端可立即为新评论绑定“回复”操作，无需整页刷新。
+        return R.success(uuid.toString());
     }
 
     @GetMapping("/notification")

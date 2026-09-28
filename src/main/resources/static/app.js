@@ -95,20 +95,50 @@ function empty(title, copy) {
   return `<section class="card empty"><strong>${title}</strong><span>${copy}</span></section>`;
 }
 async function home() {
-  app.innerHTML = `<header class="page-head"><div><h1>博墙</h1><p>记录此刻，也看见彼此。</p></div><button class="primary" data-route="compose">发布</button></header><div id="feed" class="feed">${empty("正在加载…", "")}</div>`;
-  try {
-    const posts = await api(
-      `/posts/getAllPosts?page=1&size=20&account=${encodeURIComponent(state.user.account)}`,
-    );
-    document.querySelector("#feed").innerHTML = posts.length
-      ? posts.map(postCard).join("")
-      : empty("还没有动态", "成为第一个发布内容的人吧。");
-  } catch (e) {
-    document.querySelector("#feed").innerHTML = empty(
-      "动态加载失败",
-      esc(e.message),
-    );
+  app.innerHTML = `<header class="page-head"><div><h1>博墙</h1><p>记录此刻，也看见彼此。</p></div><button class="primary" data-route="compose">发布</button></header><div id="feed" class="feed"></div><div id="feed-sentinel" class="feed-sentinel"><span>正在加载推荐内容…</span></div>`;
+  const feed = document.querySelector("#feed");
+  const sentinel = document.querySelector("#feed-sentinel");
+  let page = 1;
+  const pageSize = 10;
+  let isLoading = false;
+  let hasMore = true;
+
+  async function loadMore() {
+    if (isLoading || !hasMore || state.route !== "home" || !feed.isConnected) return;
+    isLoading = true;
+    sentinel.innerHTML = "<span>正在加载更多动态…</span>";
+    try {
+      const posts = await api(
+        `/posts/recommendations?page=${page}&size=${pageSize}&account=${encodeURIComponent(state.user.account)}`,
+      );
+      if (page === 1 && !posts.length) {
+        feed.innerHTML = empty("还没有动态", "成为第一个发布内容的人吧。");
+      } else if (posts.length) {
+        const banner = page === 1
+          ? `<section class="recommendation-note"><span>✦</span><div><b>为你推荐</b><small>根据你的关注、点赞和评论动态排序</small></div></section>`
+          : "";
+        feed.insertAdjacentHTML("beforeend", `${banner}${posts.map(postCard).join("")}`);
+        page += 1;
+      }
+      hasMore = posts.length === pageSize;
+      sentinel.innerHTML = hasMore
+        ? "<span>继续下滑，发现更多动态</span>"
+        : "<span>已经到底啦，去发布一条新动态吧。</span>";
+    } catch (e) {
+      if (page === 1) feed.innerHTML = empty("动态加载失败", esc(e.message));
+      sentinel.innerHTML = `<button type="button">加载失败，点击重试</button>`;
+      sentinel.querySelector("button").onclick = () => loadMore();
+    } finally {
+      isLoading = false;
+    }
   }
+
+  const observer = new IntersectionObserver(
+    ([entry]) => entry.isIntersecting && loadMore(),
+    { rootMargin: "260px 0px" },
+  );
+  observer.observe(sentinel);
+  await loadMore();
 }
 function compose() {
   let files = [];
@@ -163,26 +193,28 @@ function compose() {
   };
 }
 async function discover() {
-  app.innerHTML = `<header class="page-head"><div><h1>探索</h1><p>搜索感兴趣的内容。</p></div></header><form id="search" class="searchbar"><input id="q" placeholder="搜索动态或账号"><button class="primary">搜索</button></form><div id="results" class="search-results"></div>`;
+  app.innerHTML = `<header class="page-head"><div><h1>探索</h1><p>输入用户 ID、昵称或动态内容，找到相关的每一条动态。</p></div></header><form id="search" class="searchbar"><input id="q" maxlength="100" autocomplete="off" placeholder="搜索 ID、昵称或动态内容"><button class="primary">搜索</button></form><p class="search-tip">例如：<button type="button" data-search-example="ferry">ferry</button><button type="button" data-search-example="旅行">旅行</button><button type="button" data-search-example="今天">今天</button></p><div id="results" class="search-results"></div>`;
+  document.querySelectorAll("[data-search-example]").forEach((button) => {
+    button.onclick = () => {
+      document.querySelector("#q").value = button.dataset.searchExample;
+      document.querySelector("#search").requestSubmit();
+    };
+  });
   document.querySelector("#search").onsubmit = async (e) => {
     e.preventDefault();
-    const q = document.querySelector("#q").value;
+    const q = document.querySelector("#q").value.trim();
+    if (!q) return toast("请输入用户 ID、昵称或动态内容");
+    const results = document.querySelector("#results");
+    results.innerHTML = empty("正在搜索…", `正在查找“${esc(q)}”相关的动态。`);
     try {
       const posts = await api(
-        `/posts/getPostsPages?page=1&size=30&inValue=${encodeURIComponent(q)}`,
+        `/posts/getPostsPages?page=1&size=30&inValue=${encodeURIComponent(q)}&account=${encodeURIComponent(state.user.account)}`,
       );
-      const r = document.querySelector("#results");
-      r.innerHTML =
-        posts
-          .flatMap((p) =>
-            (p.images || []).map(
-              (i) =>
-                `<button data-profile="${esc(p.account)}" title="查看 @${esc(p.account)} 的主页"><img src="${esc(i.url)}" alt="${esc(p.text)}"><span>@${esc(p.account)}</span></button>`,
-            ),
-          )
-          .join("") || empty("没有图片动态", "试试换一个关键词。");
+      results.innerHTML = posts.length
+        ? `<p class="search-summary">找到 <b>${posts.length}</b> 条与“${esc(q)}”相关的动态</p><div class="feed search-feed">${posts.map(postCard).join("")}</div>`
+        : empty("没有找到相关动态", "试试用户 ID、昵称，或动态正文中的其他关键词。");
     } catch (e) {
-      toast(e.message);
+      results.innerHTML = empty("搜索失败", esc(e.message));
     }
   };
 }
@@ -597,7 +629,13 @@ document.addEventListener("click", (e) => {
       }),
     })
       .then(() => {
-        render();
+        const wasLiked = like.dataset.liked === "1";
+        const nextLiked = !wasLiked;
+        const currentCount = Number(like.dataset.likeCount || 0);
+        const nextCount = Math.max(0, currentCount + (nextLiked ? 1 : -1));
+        like.dataset.liked = nextLiked ? "1" : "0";
+        like.dataset.likeCount = String(nextCount);
+        like.innerHTML = `<img class="action-icon" src="/assets/interact/${nextLiked ? "liked" : "like"}.png" alt="">${nextLiked ? "已赞" : "赞"}${nextCount ? ` ${nextCount}` : ""}`;
       })
       .catch((x) => toast(x.message));
 
@@ -614,7 +652,19 @@ async function deletePost(postId) {
       { method: "DELETE" },
     );
     toast("动态已删除");
-    render();
+    const post = document
+      .querySelector(`[data-delete="${postId}"]`)
+      ?.closest(".post");
+    if (post) {
+      post.remove();
+      const feed = document.querySelector("#feed");
+      if (feed && !feed.querySelector(".post")) {
+        feed.innerHTML = empty("还没有动态", "成为第一个发布内容的人吧。");
+      }
+    } else {
+      // 例如从个人主页删除后，局部刷新当前主页即可，不改变路由。
+      profile();
+    }
   } catch (error) {
     toast(error.message);
   }
@@ -648,21 +698,52 @@ function formatPostTime(value) {
   }).format(date);
 }
 
+function commentLine(c, nested = false) {
+  const comment = c.comments || {};
+  const author = esc(c.name || "用户");
+  const reply = c.replyToName ? `<span class="comment-to">回复 <b>${esc(c.replyToName)}</b></span>` : "";
+  return `<div class="comment-line${nested ? " comment-reply" : ""}"><button class="profile-link" data-profile="${esc(c.account || comment.account)}"><b>${author}</b></button>${reply}<span class="comment-copy">${esc(comment.text)}</span><button class="reply-button" data-reply="${esc(comment.id)}" data-reply-account="${esc(comment.account)}" data-reply-name="${author}">回复</button></div>`;
+}
+
+function commentPreview(post) {
+  const allComments = post.comments || [];
+  if (!allComments.length) return "";
+
+  const repliesByParent = new Map();
+  const roots = [];
+  allComments.forEach((item) => {
+    const parentId = item.comments?.parentId;
+    if (parentId) {
+      const replies = repliesByParent.get(parentId) || [];
+      replies.push(item);
+      repliesByParent.set(parentId, replies);
+    } else {
+      roots.push(item);
+    }
+  });
+  // Keep malformed/orphaned replies visible instead of silently dropping them.
+  allComments.filter((item) => item.comments?.parentId && !allComments.some((candidate) => candidate.comments?.id === item.comments.parentId))
+    .forEach((item) => roots.push(item));
+
+  const threads = roots.map((root) => {
+    const replies = repliesByParent.get(root.comments?.id) || [];
+    return `<div class="comment-thread">${commentLine(root)}${replies.length ? `<div class="comment-replies">${replies.map((reply) => commentLine(reply, true)).join("")}</div>` : ""}</div>`;
+  }).join("");
+  const needsToggle = roots.length > 2 || allComments.length > 3;
+  const toggle = needsToggle
+    ? `<button class="comment-more" data-comment-toggle aria-expanded="false" data-expand-text="展开全部 ${allComments.length} 条评论" data-collapse-text="收起评论">展开全部 ${allComments.length} 条评论</button>`
+    : "";
+  return `<section class="comments" data-comment-count="${allComments.length}"><div class="comments-head"><b>评论 <span>${allComments.length}</span></b>${toggle}</div><div class="comment-list is-collapsed">${threads}</div></section>`;
+}
+
 function postCard(post) {
   const user = post.user || { account: post.account, name: post.account };
   const imageList = post.images || [];
   const images = imageList
     .map((i) => `<img data-preview-image src="${esc(i.url)}" alt="动态图片">`)
     .join("");
-  const comments = (post.comments || [])
-    .slice(0, 3)
-    .map((c) => {
-      const comment = c.comments || {};
-      const author = esc(c.name || "用户");
-      const reply = c.replyToName ? ` 回复 <b>${esc(c.replyToName)}</b>` : "";
-      return `<div class="comment-line"><button class="profile-link" data-profile="${esc(c.account || comment.account)}"><b>${author}</b></button>${reply}：${esc(comment.text)}<button class="reply-button" data-reply="${esc(comment.id)}" data-reply-account="${esc(comment.account)}" data-reply-name="${author}">回复</button></div>`;
-    })
-    .join("");
+  const commentCount = (post.comments || []).length;
+  const comments = commentPreview(post);
   const imageClass =
     [
       "",
@@ -690,13 +771,13 @@ function postCard(post) {
       <div class="post-text">${esc(post.text)}</div>
       ${images ? `<div class="post-images ${imageClass}">${images}</div>` : ""}
       <div class="post-actions">
-        <button data-like="${post.id}">
+        <button data-like="${post.id}" data-liked="${post.isLike ? "1" : "0"}" data-like-count="${Number(post.likeCount || 0)}">
           <img class="action-icon" src="/assets/interact/${post.isLike ? "liked" : "like"}.png" alt="">
           ${post.isLike ? "已赞" : "赞"}${post.likeCount ? ` ${post.likeCount}` : ""}
         </button>
-        <button data-comment="${post.id}">
+        <button data-comment="${post.id}" data-comment-count="${commentCount}">
           <img class="action-icon" src="/assets/interact/message.png" alt="">
-          评论
+          评论${commentCount ? ` ${commentCount}` : ""}
         </button>
         <button data-share="${post.id}">
           <img class="action-icon" src="/assets/interact/forward.png" alt="">
@@ -752,9 +833,20 @@ document.addEventListener("click", (e) => {
       form.hidden = false;
       form.dataset.parentId = reply.dataset.reply;
       form.dataset.replyToAccount = reply.dataset.replyAccount;
+      form.dataset.replyToName = reply.dataset.replyName;
       form.querySelector("input").placeholder = `回复 ${reply.dataset.replyName}…`;
       form.querySelector("input").focus();
     }
+    return;
+  }
+  const commentToggle = e.target.closest("[data-comment-toggle]");
+  if (commentToggle) {
+    const list = commentToggle.closest(".comments")?.querySelector(".comment-list");
+    if (!list) return;
+    const expanded = list.classList.toggle("is-expanded");
+    list.classList.toggle("is-collapsed", !expanded);
+    commentToggle.setAttribute("aria-expanded", String(expanded));
+    commentToggle.textContent = expanded ? commentToggle.dataset.collapseText : commentToggle.dataset.expandText;
     return;
   }
   const share = e.target.closest("[data-share]");
@@ -773,7 +865,7 @@ document.addEventListener("submit", async (e) => {
     comments = input.value.trim();
   if (!comments) return;
   try {
-    await api("/comments/post", {
+    const commentId = await api("/comments/post", {
       method: "POST",
       body: JSON.stringify({
         postsId: form.dataset.commentForm,
@@ -783,13 +875,41 @@ document.addEventListener("submit", async (e) => {
         replyToAccount: form.dataset.replyToAccount || null,
       }),
     });
+    const parentId = form.dataset.parentId;
+    const replyToName = form.dataset.replyToName;
     toast("评论已发送");
     input.value = "";
     delete form.dataset.parentId;
     delete form.dataset.replyToAccount;
+    delete form.dataset.replyToName;
     input.placeholder = "写下你的评论…";
     form.hidden = true;
-    render();
+    const post = form.closest(".post");
+    if (post) {
+      const author = esc(state.user.name || state.user.account || "我");
+      let commentsBox = post.querySelector(".comments");
+      if (!commentsBox) {
+        commentsBox = document.createElement("section");
+        commentsBox.className = "comments";
+        commentsBox.dataset.commentCount = "0";
+        commentsBox.innerHTML = '<div class="comments-head"><b>评论 <span>0</span></b></div><div class="comment-list"></div>';
+        post.append(commentsBox);
+      }
+      const list = commentsBox.querySelector(".comment-list") || commentsBox;
+      const newComment = { name: state.user.name || state.user.account || "我", account: state.user.account, comments: { id: commentId, account: state.user.account, text: comments } };
+      if (parentId) newComment.comments.parentId = parentId;
+      if (replyToName) newComment.replyToName = replyToName;
+      list.insertAdjacentHTML("beforeend", `<div class="comment-thread">${commentLine(newComment, Boolean(parentId))}</div>`);
+      const nextCount = Number(commentsBox.dataset.commentCount || 0) + 1;
+      commentsBox.dataset.commentCount = String(nextCount);
+      const countLabel = commentsBox.querySelector(".comments-head span");
+      if (countLabel) countLabel.textContent = String(nextCount);
+      const action = post.querySelector("[data-comment-count]");
+      if (action) {
+        action.dataset.commentCount = String(nextCount);
+        action.innerHTML = '<img class="action-icon" src="/assets/interact/message.png" alt="">评论 ' + nextCount;
+      }
+    }
   } catch (err) {
     toast(err.message);
   }
