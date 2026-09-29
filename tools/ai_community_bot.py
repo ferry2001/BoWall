@@ -238,8 +238,8 @@ OCCUPATION_EVENT_BIAS = {
     "医生": {"work": 5, "home": 2}, "销售": {"work": 5, "social": 3},
 }
 
-EVENT_IMAGE_PROBABILITY = {"photo": .95, "share": .45, "story": .25, "moment": .20, "achievement": .20,
-                           "complaint": .08, "observation": .15, "question": .05, "opinion": .03, "random": .08}
+EVENT_IMAGE_PROBABILITY = {"photo": .25, "share": .10, "story": .08, "moment": .05, "achievement": .08,
+                           "complaint": .02, "observation": .03, "question": .01, "opinion": .01, "random": .02}
 
 REPLY_INTENT_WEIGHTS = {"agree": .16, "tease": .12, "ask_detail": .14, "own_experience": .14,
                         "disagree": .08, "clarify": .08, "emotional_reaction": .10, "short_reaction": .08,
@@ -890,7 +890,7 @@ def gen_persona(idx: int, used_nicks: list, state: dict) -> dict | None:
             "language": nat["language"], "lang_code": nat["lang_code"], "prompt_lang": nat["prompt_lang"],
             "personality": personality, "occupation": occupation, "income": income,
             "interests": random.sample(list(INTEREST_KEYWORDS), k=random.randint(2, 4)),
-            "llm_provider": provider_name}
+            "llm_provider": provider_name, "social_anxiety": random.uniform(.1, .8), "fear_of_judgment": .2}
 
 
 def _weighted_choice(mapping: dict) -> str:
@@ -934,6 +934,56 @@ def build_post_intent(acc: dict, event: dict) -> dict:
     elif "话痨" in personality: style += "，可补充一两个具体细节"
     lower, upper = (15, 55) if event["importance"] < .4 else (30, 110)
     return {"post_type": post_type, "style": style, "min_length": lower, "max_length": upper}
+
+
+def calculate_driving_force(event: dict, acc: dict) -> float:
+    """计算生活事件带来的表达冲动；高兴或破防更容易突破评价恐惧。"""
+    mood, importance = event.get("mood", "normal"), float(event.get("importance", .5) or .5)
+    personality = str(acc.get("personality") or "")
+    if mood in ("excited", "happy", "satisfied"):
+        force = importance * 1.2 + .3 + (.2 if any(item in personality for item in ("热情", "话痨")) else 0)
+    elif mood in ("annoyed", "disappointed", "depressed"):
+        force = importance + .1 - (.1 if any(item in personality for item in ("内向", "社恐")) else 0)
+    else:
+        force = importance * .3
+    return max(0.0, min(1.5, force))
+
+
+def calculate_reply_driving_force(target_text: str, incoming_text: str, acc: dict, state: dict,
+                                  target_acc: str) -> float:
+    """计算在评论区发言的冲动：情绪刺激和关系都会提高表达欲。"""
+    force = .20
+    text = f"{target_text or ''} {incoming_text or ''}".lower()
+    if any(word in text for word in ("哈哈", "笑死", "太棒了", "牛逼", "救命", "无语", "气死", "离谱", "绷不住")):
+        force += .45
+    relation = state.get("relationships", {}).get(acc["account"], {}).get(target_acc, {})
+    affinity = float(relation.get("affinity", 0) or 0)
+    if affinity > .4: force += .35
+    elif affinity < -.2: force += .25
+    return max(0.0, min(1.5, force))
+
+
+def calculate_reply_fear_resistance(target_acc: str, is_own_post: bool, acc: dict, state: dict) -> float:
+    """自己的帖子是主场；在陌生人的帖子下发言则有额外心理压力。"""
+    resistance = float(acc.get("fear_of_judgment", .2) or .2) * (1 + float(acc.get("social_anxiety", .3) or .3))
+    if is_own_post:
+        resistance *= .4
+    else:
+        relation = state.get("relationships", {}).get(acc["account"], {}).get(target_acc, {})
+        if float(relation.get("familiarity", 0) or 0) < .2: resistance *= 1.4
+    if acc.get("current_mental_state") in ("inferior", "depressed"): resistance *= 1.6
+    return resistance
+
+
+def adjust_fear_of_judgment(acc: dict, state: dict, delta: float) -> float:
+    """持久化互动后的心理反馈，并同步当前会话内存。"""
+    with state_lock:
+        account_state = state.setdefault("accounts", {}).setdefault(acc["nickname"], {})
+        fear = min(1.0, max(0.0, float(account_state.get("fear_of_judgment", acc.get("fear_of_judgment", .2)) or .2) + delta))
+        account_state["fear_of_judgment"] = round(fear, 3)
+    acc["fear_of_judgment"] = round(fear, 3)
+    mark_state_dirty()
+    return fear
 
 
 def generate_event_driven_post(acc: dict, state: dict, event: dict, intent: dict, mental_state: str,
@@ -1694,9 +1744,17 @@ def check_and_reply_interactions(acc: dict, state: dict, dry_run: bool):
     reply_chance = 0.9 if "热情" in personality or "话痨" in personality else 0.3 if "高冷" in personality or "社恐" in personality else 0.6
     for item in new_replies:
         time.sleep(random.uniform(1.0, 3.0))
-        if random.random() > reply_chance: continue
-        if dry_run: continue
         commenter_name = _display_name_for(state, item["author"], "这位评论者")
+        reply_driving = calculate_reply_driving_force(item["post_text"], item["text"], acc, state, item["author"])
+        reply_fear = calculate_reply_fear_resistance(item["author"], True, acc, state)
+        if reply_driving <= reply_fear:
+            print(f"🙇 [{nick}] 看到 {commenter_name} 的评论，但因害怕争议选择装死。")
+            continue
+        adjusted_reply_chance = min(.95, reply_chance + (reply_driving - reply_fear) * .4)
+        if random.random() > adjusted_reply_chance:
+            print(f"🤐 [{nick}] 想回复 {commenter_name}，犹豫后还是算了。")
+            continue
+        if dry_run: continue
         mental_state = acc.get("current_mental_state", "normal")
         reply_text, reply_intent = generate_event_driven_reply(
             acc=acc, state=state, original_post=item["post_text"], incoming_comment=item["text"],
@@ -1714,6 +1772,10 @@ def check_and_reply_interactions(acc: dict, state: dict, dry_run: bool):
                                f"Question:{reply_intent.get('question_type')}, Topics:{','.join(reply_intent.get('topics') or [])}, "
                                f"RelatedEvents:{len(reply_intent.get('related_events') or [])}, Author:{commenter_name}, "
                                f"Affinity:{reply_intent['affinity']:.2f}, Familiarity:{reply_intent['familiarity']:.2f}, Text:{reply_text[:80]}")
+            if reply_intent["type"] in ("disagree", "tease"):
+                adjust_fear_of_judgment(acc, state, .02)
+            elif reply_intent["type"] in ("agree", "own_experience", "ask_detail"):
+                adjust_fear_of_judgment(acc, state, -.04)
 
 
 def create_post(acc: dict, text: str, dry_run: bool):
@@ -1753,6 +1815,21 @@ def like_post(acc: dict, post_id: str, dry_run: bool):
 # ---------------------------------------------------------------------------
 # 🌟 马太效应与心理异化系统
 # ---------------------------------------------------------------------------
+def ensure_social_psychology(acc: dict, state: dict) -> None:
+    """为旧账号补齐稳定的社交焦虑特质与可持久化的评价恐惧值。"""
+    nick = acc["nickname"]
+    seed = sum((index + 1) * ord(char) for index, char in enumerate(nick))
+    with state_lock:
+        account_state = state.setdefault("accounts", {}).setdefault(nick, {})
+        anxiety = account_state.get("social_anxiety", acc.get("social_anxiety"))
+        if anxiety is None: anxiety = .1 + (seed % 701) / 1000
+        fear = account_state.get("fear_of_judgment", acc.get("fear_of_judgment", .2))
+        account_state["social_anxiety"] = round(float(anxiety), 3)
+        account_state["fear_of_judgment"] = round(min(1.0, max(0.0, float(fear))), 3)
+    acc["social_anxiety"] = account_state["social_anxiety"]
+    acc["fear_of_judgment"] = account_state["fear_of_judgment"]
+
+
 def update_account_reputation(acc: dict, state: dict):
     nick = acc["nickname"]
     r = http_json("GET", "/posts/getPosts", params={"account": acc["account"]}, token=acc["token"])
@@ -1765,7 +1842,19 @@ def update_account_reputation(acc: dict, state: dict):
         acc_state["reputation_score"] = score;
         acc_state["total_views"] = total_views;
         acc_state["total_likes"] = total_likes
+        current_fear = float(acc_state.get("fear_of_judgment", .2) or .2)
+        recent_posts = [post for post in posts if isinstance(post, dict)][:3]
+        if len(recent_posts) >= 2:
+            average_likes = sum(int(post.get("likeCount") or 0) for post in recent_posts) / len(recent_posts)
+            if average_likes == 0:
+                current_fear = min(1.0, current_fear + .15)
+                print(f"📉 [{nick}] 最近发帖无人问津，评价恐惧上升 -> {current_fear:.2f}")
+            elif average_likes >= 3:
+                current_fear = max(0.0, current_fear - .10)
+                print(f"📈 [{nick}] 最近获得认可，评价恐惧下降 -> {current_fear:.2f}")
+        acc_state["fear_of_judgment"] = round(current_fear, 3)
     acc["reputation_score"] = score
+    acc["fear_of_judgment"] = acc_state["fear_of_judgment"]
     return score
 
 
@@ -1785,14 +1874,17 @@ def calculate_mental_state(acc: dict, reputation_score: float) -> str:
 
 
 def get_post_probability_and_tier(acc: dict) -> tuple[float, str, int, int]:
-    score = acc.get("reputation_score", 0);
-    base_prob = SESSION_CFG["post"]
+    score = acc.get("reputation_score", 0)
+    # 稳定地将约 80% 账号划为低发布意愿的潜水者，约 20% 为活跃分享者。
+    nick_hash = sum(ord(char) for char in str(acc.get("nickname") or "bot"))
+    innate_willingness = .05 if nick_hash % 5 else .40
+    base_prob = SESSION_CFG["post"] * innate_willingness
     if score >= 500:
-        return min(0.60, base_prob + 0.40), "👑 大V", 9, 400
+        return min(.25, base_prob + .10), "👑 大V", 9, 400
     elif score >= 100:
-        return min(0.35, base_prob + 0.20), "🌟 活跃达人", 6, 300
+        return min(.12, base_prob + .05), "🌟 活跃达人", 6, 300
     elif score >= 20:
-        return min(0.20, base_prob + 0.10), "🌱 小萌新", 3, 200
+        return min(.06, base_prob + .02), "🌱 小萌新", 3, 200
     else:
         return base_prob, "👻 透明人", 2, 150
 
@@ -1872,17 +1964,27 @@ def publish_a_post(acc: dict, state: dict, tier: str, max_imgs: int, llm_tokens:
 
         log_action(acc, "POST", target=str(pid),
                    details=f"Images:{len(imgs_to_upload)}/{batch_size}, Text:{caption[:100]}")
+        if imgs_to_upload:
+            with state_lock:
+                account_state = state.setdefault("accounts", {}).setdefault(acc["nickname"], {})
+                account_state["image_post_count"] = int(account_state.get("image_post_count", 0) or 0) + 1
+            mark_state_dirty()
 
     return pid
 
 
 def publish_event_driven_post(acc: dict, state: dict, tier: str, max_imgs: int, llm_tokens: int,
-                              mental_state: str = "normal"):
+                              mental_state: str = "normal", event: dict | None = None):
     """V4.1 发帖路径：事件决定内容，VLM 至多为该内容选图。"""
     nick = acc["nickname"]
-    event = generate_local_life_event(acc, state)
+    event = event or generate_local_life_event(acc, state)
     intent = build_post_intent(acc, event)
-    print(f"🌍 [{nick}] 生活事件: {event['description']} | mood={event['mood']} | type={intent['post_type']}")
+    current_fear = float(acc.get("fear_of_judgment", .2) or .2)
+    if current_fear > .6:
+        intent["style"] += "，语气小心试探，可用轻微自嘲或表情掩饰不安"
+    elif current_fear > .4:
+        intent["style"] += "，避免过于绝对的表达，语气稍微不自信"
+    print(f"🌍 [{nick}] 生活事件: {event['description']} | mood={event['mood']} | type={intent['post_type']} | fear={current_fear:.2f}")
     content = generate_event_driven_post(acc, state, event, intent, mental_state, llm_tokens)
     if not content:
         print(f"⚠️ [{nick}] 事件动态生成失败")
@@ -1890,7 +1992,14 @@ def publish_event_driven_post(acc: dict, state: dict, tier: str, max_imgs: int, 
 
     selected_paths = []
     batch_size = 0
-    wants_image = ENABLE_EXTERNAL_POST_IMAGES and random.random() < EVENT_IMAGE_PROBABILITY.get(intent["post_type"], .10)
+    wants_image = False
+    if ENABLE_EXTERNAL_POST_IMAGES:
+        base_image_probability = EVENT_IMAGE_PROBABILITY.get(intent["post_type"], .05)
+        account_state = state.get("accounts", {}).get(acc["nickname"], {})
+        past_image_posts = int(account_state.get("image_post_count", 0) or 0)
+        if past_image_posts > 0:
+            base_image_probability = min(.75, base_image_probability * 4.0 + .25)
+        wants_image = random.random() < base_image_probability
     if wants_image and max_imgs > 0:
         gallery_files = [f for f in os.listdir(GALLERY_DIR) if os.path.isfile(os.path.join(GALLERY_DIR, f))]
         if gallery_files:
@@ -1912,6 +2021,11 @@ def publish_event_driven_post(acc: dict, state: dict, tier: str, max_imgs: int, 
     for path in selected_paths:
         try: os.remove(path)
         except OSError: pass
+    if images:
+        with state_lock:
+            account_state = state.setdefault("accounts", {}).setdefault(acc["nickname"], {})
+            account_state["image_post_count"] = int(account_state.get("image_post_count", 0) or 0) + 1
+        mark_state_dirty()
     log_action(acc, "POST", target=str(pid),
                details=f"Event:{event['category']}/{event['mood']}, Type:{intent['post_type']}, Images:{len(images)}/{batch_size}, Text:{content[:100]}")
     return pid
@@ -1949,6 +2063,7 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
                     state["accounts"][nick]["interests"] = interests
                     state["accounts"][nick]["llm_provider"] = acc.get("llm_provider") or get_default_provider_name()
                 mark_state_dirty()
+        ensure_social_psychology(acc, state)
         update_account_reputation(acc, state)
         post_prob, tier, max_imgs, llm_tokens = get_post_probability_and_tier(acc)
         mental_state = calculate_mental_state(acc, acc.get("reputation_score", 0))
@@ -2030,7 +2145,15 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
                 else:
                     already_following.add(pauthor)
 
-            if random.random() < comment_probability:
+            reply_driving = calculate_reply_driving_force(ptext, "", acc, state, pauthor)
+            reply_fear = calculate_reply_fear_resistance(pauthor, False, acc, state)
+            if reply_driving > reply_fear:
+                adjusted_comment_probability = min(.85, comment_probability + (reply_driving - reply_fear) * .5)
+            else:
+                adjusted_comment_probability = 0.0
+                print(f"🙇 [{nick}] 想评论 {author_name} 的帖子，但害怕说错话，默默划走。"
+                      f" (推动:{reply_driving:.2f} < 阻力:{reply_fear:.2f})")
+            if random.random() < adjusted_comment_probability:
                 stance = choose_interaction_stance(state, acc["account"], pauthor, author_name)
                 c = gen_text("comment", {**acc, "target": ptext, "interaction_stance": stance,
                                          "relationship_context": relationship_context(state, acc["account"], pauthor,
@@ -2040,13 +2163,38 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
                 if comment_post(acc, pid, c, pauthor, False):
                     record_relationship(state, acc["account"], pauthor, author_name, "comment", stance, ptext)
                     log_action(acc, "COMMENT", target=str(pid), details=f"Author:{author_name}, Text:{c[:80]}")
+                    relation_after = state.get("relationships", {}).get(acc["account"], {}).get(pauthor, {})
+                    if float(relation_after.get("familiarity", 0) or 0) > .3:
+                        adjust_fear_of_judgment(acc, state, -.03)
                 time.sleep(random.uniform(2.0, 4.0))
-        if random.random() < post_prob:
-            publish_event_driven_post(acc, state, tier, max_imgs, llm_tokens, mental_state)
-            time.sleep(random.uniform(2.0, 5.0))
-            check_and_reply_interactions(acc, state, False)
+        # 先在本地生成事件，再让表达冲动与评价恐惧共同决定是否敢发帖。
+        event = generate_local_life_event(acc, state)
+        driving_force = calculate_driving_force(event, acc)
+        current_fear = float(acc.get("fear_of_judgment", .2) or .2)
+        anxiety_trait = float(acc.get("social_anxiety", .3) or .3)
+        fear_resistance = current_fear * (1.0 + anxiety_trait)
+        if mental_state in ("inferior", "depressed"): fear_resistance *= 1.5
+        print(f"🧠 [{nick}] 情绪推动力: {driving_force:.2f} | 恐惧阻力: {fear_resistance:.2f}")
+        posted = False
+        if driving_force > fear_resistance:
+            margin = driving_force - fear_resistance
+            final_post_probability = min(.80, post_prob + margin * .5)
+            if random.random() < final_post_probability:
+                print(f"🦁 [{nick}] 鼓起勇气突破恐惧，准备发帖！")
+                posted = bool(publish_event_driven_post(acc, state, tier, max_imgs, llm_tokens, mental_state, event))
+                if posted: time.sleep(random.uniform(2.0, 5.0))
+            else:
+                print(f"🤐 [{nick}] 虽有冲动，但还是选择潜水。")
         else:
-            if random.random() < 0.4: check_and_reply_interactions(acc, state, False)
+            print(f"🙇 [{nick}] 恐惧感占据上风，默默划走。")
+        if not posted:
+            with state_lock:
+                account_state = state.setdefault("accounts", {}).setdefault(nick, {})
+                account_state["fear_of_judgment"] = min(1.0, current_fear + .02)
+                acc["fear_of_judgment"] = account_state["fear_of_judgment"]
+            mark_state_dirty()
+        if posted or random.random() < .4:
+            check_and_reply_interactions(acc, state, False)
         my_relations = state.get("relationships", {}).get(acc["account"], {})
         followed_count = 0
         for target_acc, relation in my_relations.items():
