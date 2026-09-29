@@ -25,6 +25,11 @@ import java.nio.file.StandardCopyOption;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
+import javax.imageio.ImageIO;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+import java.awt.image.BufferedImage;
 
 
 @RequestMapping("/user")
@@ -64,6 +69,19 @@ public class UserController {
 
     }
 
+    /** 搜索页用户结果：账号与昵称均支持模糊匹配。 */
+    @GetMapping("/search")
+    public R<List<User>> search(@RequestParam String keyword) {
+        String value = keyword == null ? "" : keyword.trim();
+        if (value.isEmpty()) return R.success(Collections.emptyList());
+        LambdaQueryWrapper<User> query = new LambdaQueryWrapper<>();
+        query.like(User::getAccount, value)
+                .or()
+                .like(User::getName, value)
+                .last("LIMIT 30");
+        return R.success(userService.list(query));
+    }
+
     @PostMapping("/add")
     public R<String> add(HttpServletRequest request, @RequestBody Map map) {
         String account = map.get("account").toString();
@@ -94,7 +112,9 @@ public class UserController {
         log.info(map.toString());
 
         //获取手机号
-        String phone = map.get("phone").toString();
+        String requestedCountry = normalizeCountry(String.valueOf(map.getOrDefault("country", "")));
+        String phone = String.valueOf(map.getOrDefault("phone", "")).trim();
+        if (phone.isBlank()) phone = generatePhoneForCountry(requestedCountry);
 
         //获取验证码
         String code = map.get("code").toString();
@@ -121,7 +141,12 @@ public class UserController {
                 user.setAccount(UUID.randomUUID().toString());
                 user.setPhone(phone);
                 user.setStatus(1);
+                applyLanguageDefaults(user, requestedCountry);
                 userService.save(user);
+            } else if (user.getCountry() == null || user.getNativeLanguage() == null || user.getEnglishLevel() == null) {
+                // 历史账号在下次登录时也会补齐画像；不需要客户端重注册。
+                applyLanguageDefaults(user, requestedCountry);
+                userService.updateUser(user);
             }
             Map<String, Object> loginResult = new HashMap<>();
             loginResult.put("token", jwtService.createToken(user.getAccount()));
@@ -129,6 +154,49 @@ public class UserController {
             return R.success(loginResult);
         }
         return R.error("登录失败");
+    }
+
+    private void applyLanguageDefaults(User user, String requestedCountry) {
+        String country = !requestedCountry.isBlank() ? requestedCountry : inferCountryFromPhone(user.getPhone());
+        if (country.isBlank()) country = "CN";
+        user.setCountry(country);
+        String nativeLanguage = switch (country) {
+            case "CN" -> "zh"; case "JP" -> "ja"; case "KR" -> "ko"; case "FR" -> "fr";
+            case "DE" -> "de"; case "ES" -> "es"; case "RU" -> "ru"; default -> "en";
+        };
+        user.setNativeLanguage(nativeLanguage);
+        user.setEnglishLevel("en".equals(nativeLanguage) ? 1.0 : .18);
+    }
+
+    private String normalizeCountry(String country) {
+        if (country == null) return "";
+        return switch (country.trim().toUpperCase(Locale.ROOT)) {
+            case "CN", "US", "JP", "KR", "FR", "DE", "ES", "RU" -> country.trim().toUpperCase(Locale.ROOT);
+            default -> "";
+        };
+    }
+
+    private String inferCountryFromPhone(String phone) {
+        String value = phone == null ? "" : phone.replaceAll("\\s", "");
+        if (value.startsWith("+86") || value.startsWith("86") || value.matches("1\\d{10}")) return "CN";
+        if (value.startsWith("+81") || value.startsWith("81")) return "JP";
+        if (value.startsWith("+82") || value.startsWith("82")) return "KR";
+        if (value.startsWith("+33") || value.startsWith("33")) return "FR";
+        if (value.startsWith("+49") || value.startsWith("49")) return "DE";
+        if (value.startsWith("+34") || value.startsWith("34")) return "ES";
+        if (value.startsWith("+7") || value.startsWith("7")) return "RU";
+        return value.startsWith("+1") || value.startsWith("1") ? "US" : "";
+    }
+
+    private String generatePhoneForCountry(String country) {
+        String prefix = switch (country) {
+            case "JP" -> "+81"; case "KR" -> "+82"; case "FR" -> "+33"; case "DE" -> "+49";
+            case "ES" -> "+34"; case "RU" -> "+7"; case "US" -> "+1"; default -> "+86";
+        };
+        int digits = "US".equals(country) ? 10 : "RU".equals(country) ? 10 : 10;
+        StringBuilder phone = new StringBuilder(prefix);
+        for (int index = 0; index < digits; index++) phone.append(ThreadLocalRandom.current().nextInt(10));
+        return phone.toString();
     }
 
 
@@ -159,20 +227,37 @@ public class UserController {
         if (user == null) {
             return R.error("用户不存在");
         }
-
         String originalName = Optional.ofNullable(avatar.getOriginalFilename()).orElse("");
         int extensionStart = originalName.lastIndexOf('.') + 1;
-        String extension = extensionStart > 0 ? originalName.substring(extensionStart).toLowerCase(Locale.ROOT) : "";
+        String extension = extensionStart > 0
+                ? originalName.substring(extensionStart).toLowerCase(Locale.ROOT) : "";
         if (!IMAGE_EXTENSIONS.contains(extension)) {
-            return R.error("头像仅支持 JPG、PNG、GIF 或 WebP 图片");
+            return R.error("头像仅支持 JPG、PNG、GIF 或 WebP 格式");
         }
-
         Path directory = Path.of(uploadDir).toAbsolutePath();
         Files.createDirectories(directory);
-        String fileName = UUID.randomUUID() + "." + extension;
-        try (var input = avatar.getInputStream()) {
-            Files.copy(input, directory.resolve(fileName), StandardCopyOption.REPLACE_EXISTING);
+
+        // === 核心：读图 -> 中心裁剪成正方形 -> 缩放到 400x400 ===
+        BufferedImage original = ImageIO.read(avatar.getInputStream());
+        if (original == null) {
+            return R.error("无法读取图片内容");
         }
+        int w = original.getWidth(), h = original.getHeight();
+        int side = Math.min(w, h);
+        BufferedImage squared = original.getSubimage((w - side) / 2, (h - side) / 2, side, side);
+        boolean keepAlpha = "png".equals(extension);   // png 保留透明通道，避免黑底
+        BufferedImage out = new BufferedImage(400, 400,
+                keepAlpha ? BufferedImage.TYPE_INT_ARGB : BufferedImage.TYPE_INT_RGB);
+        Graphics2D g2 = out.createGraphics();
+        g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION,
+                RenderingHints.VALUE_INTERPOLATION_BICUBIC);
+        g2.drawImage(squared, 0, 0, 400, 400, null);
+        g2.dispose();
+
+        // gif 只保留首帧，统一转 png；其余保持原格式
+        String finalExt = extension.equals("gif") ? "png" : extension;
+        String fileName = UUID.randomUUID() + "." + finalExt;
+        ImageIO.write(out, finalExt, directory.resolve(fileName).toFile());
 
         user.setAvatar("/images/" + fileName);
         userService.updateUser(user);
