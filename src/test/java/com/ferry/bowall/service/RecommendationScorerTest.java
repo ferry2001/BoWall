@@ -22,17 +22,31 @@ class RecommendationScorerTest {
         PostQualityDto high = quality(120, 88, 76, 8, 12, 4);
         PostQualityDto low = quality(120, 12, 8, 70, 1, 0);
 
-        double highScore = scorer.score(post, high, 6).getTotalScore();
-        double lowScore = scorer.score(post, low, 0).getTotalScore();
+        double highScore = scorer.score(post, high, 6, 20, 50, 3).getTotalScore();
+        double lowScore = scorer.score(post, low, 0, 0, 50, 3).getTotalScore();
 
         assertTrue(highScore > lowScore);
-        assertTrue(scorer.score(post, high, 6).getComponents().containsKey("dwellQuality"));
+        assertTrue(scorer.score(post, high, 6, 20, 50, 3).getComponents().containsKey("trafficPool"));
     }
 
     @Test
     void supportsFastTimeOrderFallback() {
         assertTrue(scorer.useTimeMode("time"));
         assertFalse(scorer.useTimeMode("quality"));
+    }
+
+    @Test
+    void audienceAndHeatProvideBoundedGlobalDistributionBoost() {
+        Posts post = new Posts();
+        post.setId("audience-post");
+        post.setUpdateDate(LocalDateTime.now().minusHours(2));
+        PostQualityDto quality = quality(100, 50, 45, 25, 4, 1);
+
+        double unknownAuthor = scorer.score(post, quality, 0, 0, 50, 3).getTotalScore();
+        double establishedAuthor = scorer.score(post, quality, 0, 100, 50, 3).getTotalScore();
+
+        assertTrue(establishedAuthor > unknownAuthor);
+        assertTrue(establishedAuthor <= 100);
     }
 
     private PostQualityDto quality(long views, double dwellScore, double effectiveRate,

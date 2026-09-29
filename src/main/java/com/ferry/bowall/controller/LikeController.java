@@ -1,6 +1,7 @@
 package com.ferry.bowall.controller;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import com.ferry.bowall.common.R;
 import com.ferry.bowall.dto.LikeDto;
 import com.ferry.bowall.entity.Image;
@@ -15,6 +16,7 @@ import com.ferry.bowall.service.PostsService;
 import com.ferry.bowall.service.UserService;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -46,6 +48,7 @@ public class LikeController {
     private ImageService imageService;
 
     @PostMapping
+    @Transactional(rollbackFor = Exception.class)
     public R<String> like(@RequestBody Map map) {
         String account = map.get("account").toString();
         String postId = map.get("postId").toString();
@@ -60,10 +63,16 @@ public class LikeController {
             like01.setId(UUID.randomUUID().toString());
             like01.setIsRead("no");
             like01.setUpdateDate(LocalDateTime.now());
-            likeService.save(like01);
+            if (!likeService.save(like01)) return R.error("点赞失败");
+            postsService.update(new LambdaUpdateWrapper<Posts>()
+                    .eq(Posts::getId, postId)
+                    .setSql("like_count = COALESCE(like_count, 0) + 1"));
             return R.success("点赞成功");
         }else {
-            likeService.remove(likesLambdaQueryWrapper);
+            if (!likeService.remove(likesLambdaQueryWrapper)) return R.error("取消点赞失败");
+            postsService.update(new LambdaUpdateWrapper<Posts>()
+                    .eq(Posts::getId, postId)
+                    .setSql("like_count = GREATEST(0, COALESCE(like_count, 0) - 1)"));
             return R.success("取消点赞");
         }
     }

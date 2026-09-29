@@ -58,13 +58,16 @@ app:
     freshness-half-life-hours: 36
     exploration-weight: 0.05
     weights:
-      dwell-quality: 0.27
-      effective-read: 0.18
-      like-rate: 0.12
-      comment-rate: 0.10
-      low-skip-rate: 0.12
-      freshness: 0.14
-      author-affinity: 0.07
+      dwell-quality: 0.21
+      effective-read: 0.14
+      like-rate: 0.10
+      comment-rate: 0.08
+      low-skip-rate: 0.08
+      freshness: 0.11
+      author-affinity: 0.05
+      author-audience: 0.05
+      global-heat: 0.07
+      traffic-pool: 0.11
 mybatis-plus:
   configuration:
     #在映射实体或者属性时，将数据库中表名和字段名中的下划线去掉，按照驼峰命名法映射

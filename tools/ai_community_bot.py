@@ -1103,7 +1103,7 @@ def fetch_latest_posts(acc: dict, limit: int = 15, exclude_ids: list | None = No
         # 状态保留 500 条，但单次 GET 只传最近 150 条，避免 URL 过长。
         params["excludeIds"] = ",".join(
             str(post_id) for post_id in exclude_ids[-MAX_EXCLUDED_POST_IDS_PER_REQUEST:] if post_id)
-    r = http_json("GET", "/posts/getAllPosts", params=params, token=acc["token"])
+    r = http_json("GET", "/posts/recommendations", params=params, token=acc["token"])
     data = (r or {}).get("data")
     return data if isinstance(data, list) else []
 
@@ -1955,11 +1955,21 @@ def update_account_reputation(acc: dict, state: dict):
     posts = (r or {}).get("data") or []
     total_views = sum(int(p.get("viewCount") or 0) for p in posts if isinstance(p, dict))
     total_likes = sum(int(p.get("likeCount") or 0) for p in posts if isinstance(p, dict))
-    score = total_views * 0.05 + total_likes * 5.0
+
+    # 浏览带来缓慢的基础成长；点赞贡献线性声望；持续高赞会获得爆款加成。
+    score = total_views * .01 + total_likes * 2.0 + (total_likes // 10) ** 1.5
+
+    def get_tier(value: float) -> str:
+        if value >= 500: return "👑 大V"
+        if value >= 100: return "🌟 活跃达人"
+        if value >= 20: return "🌱 小萌新"
+        return "👻 透明人"
+
     with state_lock:
         acc_state = state.setdefault("accounts", {}).setdefault(nick, {})
-        acc_state["reputation_score"] = score;
-        acc_state["total_views"] = total_views;
+        old_score = float(acc_state.get("reputation_score", 0) or 0)
+        acc_state["reputation_score"] = score
+        acc_state["total_views"] = total_views
         acc_state["total_likes"] = total_likes
         current_fear = float(acc_state.get("fear_of_judgment", .2) or .2)
         recent_posts = [post for post in posts if isinstance(post, dict)][:3]
@@ -1967,13 +1977,18 @@ def update_account_reputation(acc: dict, state: dict):
             average_likes = sum(int(post.get("likeCount") or 0) for post in recent_posts) / len(recent_posts)
             if average_likes == 0:
                 current_fear = min(1.0, current_fear + .15)
-                print(f"📉 [{nick}] 最近发帖无人问津，评价恐惧上升 -> {current_fear:.2f}")
-            elif average_likes >= 3:
+            elif average_likes >= 2:
                 current_fear = max(0.0, current_fear - .10)
-                print(f"📈 [{nick}] 最近获得认可，评价恐惧下降 -> {current_fear:.2f}")
         acc_state["fear_of_judgment"] = round(current_fear, 3)
+
     acc["reputation_score"] = score
     acc["fear_of_judgment"] = acc_state["fear_of_judgment"]
+    old_tier, current_tier = get_tier(old_score), get_tier(score)
+    if current_tier != old_tier and old_score > 1.0:
+        print(f"🎉 [{nick}] 账号成长！从 [{old_tier}] 晋升为 [{current_tier}] (当前声望: {score:.1f})")
+    elif old_score <= 1.0 and score >= 20:
+        print(f"🌱 [{nick}] 账号成长！突破零声望，晋升为 [{current_tier}] (当前声望: {score:.1f})")
+    mark_state_dirty()
     return score
 
 

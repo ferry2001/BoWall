@@ -54,6 +54,9 @@ public class PostsController {
     private FollowersService followersService;
 
     @Autowired
+    private FansService fansService;
+
+    @Autowired
     private PostDwellService postDwellService;
 
     @Autowired
@@ -154,7 +157,7 @@ public class PostsController {
         long effectiveReads = recordedDwell.stream().filter(seconds -> seconds >= effectiveThreshold).count();
         long zeroDwellViews = Math.max(0, totalViews - recordedDwell.size());
         long quickSkips = zeroDwellViews + recordedDwell.stream().filter(seconds -> seconds < quickSkipThreshold).count();
-        long likeCount = likeService.count(new LambdaQueryWrapper<Likes>().eq(Likes::getPostId, postId));
+        long likeCount = post.getLikeCount() == null ? 0 : post.getLikeCount();
         long commentCount = commentsService.count(new LambdaQueryWrapper<Comments>()
                 .eq(Comments::getPostsId, postId)
                 .eq(Comments::getIsDel, CommentsIsDel.no));
@@ -348,7 +351,8 @@ public class PostsController {
             @RequestParam String account,
             @RequestParam(defaultValue = "1") int page,
             @RequestParam(defaultValue = "20") int size,
-            @RequestParam(required = false) String mode) {
+            @RequestParam(required = false) String mode,
+            @RequestParam(required = false) String excludeIds) {
         int safePage = Math.max(page, 1);
         int safeSize = Math.min(Math.max(size, 1), 50);
         Map<String, Integer> authorAffinity = new java.util.HashMap<>();
@@ -384,16 +388,47 @@ public class PostsController {
 
         // 多取一些候选后在内存中进行规则评分；异常时保留时间流作为兜底。
         LambdaQueryWrapper<Posts> candidateQuery = new LambdaQueryWrapper<>();
-        candidateQuery.ne(Posts::getAccount, account)
+        candidateQuery.ne(Posts::getAccount, account);
+        if (excludeIds != null && !excludeIds.isBlank()) {
+            LinkedHashSet<String> excluded = new LinkedHashSet<>();
+            for (String candidate : excludeIds.split(",")) {
+                String postId = candidate.trim();
+                if (!postId.isEmpty()) excluded.add(postId);
+                if (excluded.size() >= 500) break;
+            }
+            if (!excluded.isEmpty()) candidateQuery.notIn(Posts::getId, excluded);
+        }
+        candidateQuery
                 .orderByDesc(Posts::getUpdateDate);
-        List<Posts> candidates = postsService.page(new Page<>(1, 200), candidateQuery).getRecords();
+        List<Posts> candidates = postsService.page(new Page<>(1, 500), candidateQuery).getRecords();
+        double averageViews = candidates.stream()
+                .mapToLong(post -> post.getViewCount() == null ? 0 : post.getViewCount())
+                .average().orElse(0);
+        double averageLikes = candidates.stream()
+                .mapToLong(post -> post.getLikeCount() == null ? 0 : post.getLikeCount())
+                .average().orElse(0);
+        Map<String, Long> authorFanCounts = new java.util.HashMap<>();
+        LinkedHashSet<String> authorAccounts = new LinkedHashSet<>();
+        for (Posts candidate : candidates) {
+            if (candidate.getAccount() != null && !candidate.getAccount().isBlank()) {
+                authorAccounts.add(candidate.getAccount());
+            }
+        }
+        if (!authorAccounts.isEmpty()) {
+            LambdaQueryWrapper<Fans> fansQuery = new LambdaQueryWrapper<>();
+            fansQuery.in(Fans::getAccount, authorAccounts);
+            for (Fans fan : fansService.list(fansQuery)) {
+                authorFanCounts.merge(fan.getAccount(), 1L, Long::sum);
+            }
+        }
         Map<String, RecommendationDetailDto> scoreDetails = new java.util.HashMap<>();
         boolean timeMode = recommendationScorer.useTimeMode(mode);
         if (!timeMode) {
             try {
                 for (Posts post : candidates) {
                     scoreDetails.put(post.getId(), recommendationScorer.score(
-                            post, buildPostQuality(post), authorAffinity.getOrDefault(post.getAccount(), 0)));
+                            post, buildPostQuality(post), authorAffinity.getOrDefault(post.getAccount(), 0),
+                            authorFanCounts.getOrDefault(post.getAccount(), 0L), averageViews, averageLikes));
                 }
                 candidates.sort((left, right) -> {
                     int scoreCompare = Double.compare(
@@ -428,6 +463,7 @@ public class PostsController {
             dto.setId(post.getId());
             dto.setText(post.getText());
             dto.setViewCount(post.getViewCount());
+            dto.setIsFeatured(post.getIsFeatured());
             dto.setUpdateDate(post.getUpdateDate());
             dto.setImages(imageService.list(imageQuery));
 
@@ -453,9 +489,7 @@ public class PostsController {
                     .eq(Likes::getPostId, post.getId());
             dto.setIsLike(likeService.getOne(currentLikeQuery) == null ? 0 : 1);
 
-            LambdaQueryWrapper<Likes> likeCountQuery = new LambdaQueryWrapper<>();
-            likeCountQuery.eq(Likes::getPostId, post.getId());
-            dto.setLikeCount(likeService.count(likeCountQuery));
+            dto.setLikeCount(post.getLikeCount() == null ? 0 : post.getLikeCount());
             dto.setRecommendation(scoreDetails.get(post.getId()));
             recommendations.add(dto);
         }
@@ -472,6 +506,7 @@ public class PostsController {
         posts.setAccount(account);
         posts.setId(uuid.toString());
         posts.setText(text);
+        posts.setLikeCount(0L);
         posts.setUpdateDate(LocalDateTime.now());
 
         postsService.save(posts);
@@ -490,6 +525,7 @@ public class PostsController {
         posts.setAccount(account);
         posts.setId(uuid.toString());
         posts.setText("转发来自用户账号为@"+post.getAccount()+"的动态:"+post.getText());
+        posts.setLikeCount(0L);
         posts.setUpdateDate(LocalDateTime.now());
         postsService.save(posts);
         for (Object o : list) {

@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS `posts` (
     `account` VARCHAR(36) NOT NULL,
     `text` TEXT,
     `view_count` BIGINT NOT NULL DEFAULT 0,
+    `like_count` BIGINT NOT NULL DEFAULT 0 COMMENT '点赞数冗余字段',
     `is_featured` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为精品贴 (0:否, 1:是)',
     `update_date` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (`id`),
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS `posts` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 ALTER TABLE `posts` ADD COLUMN `view_count` BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE `posts` ADD COLUMN `like_count` BIGINT NOT NULL DEFAULT 0 COMMENT '点赞数冗余字段';
 ALTER TABLE `posts` ADD COLUMN `is_featured` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为精品贴 (0:否, 1:是)';
 
 CREATE TABLE IF NOT EXISTS `post_dwell` (
@@ -87,6 +89,11 @@ CREATE TABLE IF NOT EXISTS `likes` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 ALTER TABLE `likes` ADD COLUMN `is_read` VARCHAR(3) NOT NULL DEFAULT 'no';
+
+-- 旧数据升级：仅回填未初始化的零值，后续由点赞接口原子维护。
+UPDATE `posts` p SET p.`like_count` = (
+    SELECT COUNT(*) FROM `likes` l WHERE l.`post_id` = p.`id`
+) WHERE p.`like_count` = 0;
 
 CREATE TABLE IF NOT EXISTS `message` (
     `id` VARCHAR(36) NOT NULL,
