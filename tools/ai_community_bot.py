@@ -351,15 +351,58 @@ def assign_llm_provider(state: dict, allow_overflow: bool = False) -> dict | Non
 
 ALLOWED_MIME = {"image/jpeg": "jpg", "image/png": "png", "image/gif": "gif", "image/webp": "webp"}
 NATIONALITIES = [
-    {"country": "中国", "language": "中文", "lang_code": "zh", "prompt_lang": "简体中文"},
-    {"country": "美国", "language": "English", "lang_code": "en", "prompt_lang": "English"},
-    {"country": "日本", "language": "日本語", "lang_code": "ja", "prompt_lang": "日本語"},
-    {"country": "韩国", "language": "한국어", "lang_code": "ko", "prompt_lang": "한국어"},
-    {"country": "法国", "language": "Français", "lang_code": "fr", "prompt_lang": "Français"},
-    {"country": "德国", "language": "Deutsch", "lang_code": "de", "prompt_lang": "Deutsch"},
-    {"country": "俄罗斯", "language": "Русский", "lang_code": "ru", "prompt_lang": "Русский"},
-    {"country": "西班牙", "language": "Español", "lang_code": "es", "prompt_lang": "Español"},
+    {"country": "中国", "country_code": "CN", "language": "中文", "lang_code": "zh", "prompt_lang": "简体中文"},
+    {"country": "美国", "country_code": "US", "language": "English", "lang_code": "en", "prompt_lang": "English"},
+    {"country": "日本", "country_code": "JP", "language": "日本語", "lang_code": "ja", "prompt_lang": "日本語"},
+    {"country": "韩国", "country_code": "KR", "language": "한국어", "lang_code": "ko", "prompt_lang": "한국어"},
+    {"country": "法国", "country_code": "FR", "language": "Français", "lang_code": "fr", "prompt_lang": "Français"},
+    {"country": "德国", "country_code": "DE", "language": "Deutsch", "lang_code": "de", "prompt_lang": "Deutsch"},
+    {"country": "俄罗斯", "country_code": "RU", "language": "Русский", "lang_code": "ru", "prompt_lang": "Русский"},
+    {"country": "西班牙", "country_code": "ES", "language": "Español", "lang_code": "es", "prompt_lang": "Español"},
 ]
+LANGUAGE_PROMPT_NAMES = {item["lang_code"]: item["prompt_lang"] for item in NATIONALITIES}
+EDUCATION_ENGLISH_BASE = {"primary": .05, "middle_school": .10, "high_school": .18,
+                          "bachelor": .32, "master": .48, "phd": .58, "overseas": .82}
+OCCUPATION_ENGLISH_BONUS = {"程序": .12, "开发": .12, "产品": .10, "设计": .07, "金融": .12,
+                            "投行": .15, "咨询": .15, "外贸": .18, "翻译": .25, "教师": .08, "学生": .05}
+INCOME_ENGLISH_BONUS = {"低": -.05, "中": 0, "高": .08}
+
+
+def build_language_profile(country_code: str, native: str, education: str, occupation: str, income: str) -> dict:
+    if native == "en": english_level = 1.0
+    else:
+        occupation_bonus = max((bonus for keyword, bonus in OCCUPATION_ENGLISH_BONUS.items() if keyword in occupation), default=0.0)
+        english_level = min(.95, max(.01, EDUCATION_ENGLISH_BASE.get(education, .18) + occupation_bonus +
+                                     INCOME_ENGLISH_BONUS.get(income, 0)))
+    languages = {native: 1.0, "en": english_level}
+    return {"country": country_code, "native": native, "education": education,
+            "english_level": round(english_level, 3), "languages": languages}
+
+
+def ensure_language_profile(acc: dict, state: dict) -> dict:
+    cached = acc.get("language_profile")
+    if isinstance(cached, dict) and cached.get("native") and isinstance(cached.get("languages"), dict): return cached
+    nat = next((item for item in NATIONALITIES if item["country"] == acc.get("nationality")), None)
+    country_code = acc.get("country_code") or (nat or {}).get("country_code", "")
+    native = acc.get("lang_code") or (nat or {}).get("lang_code", "en")
+    profile = build_language_profile(country_code, native, acc.get("education", "high_school"),
+                                     acc.get("occupation", ""), acc.get("income", "中"))
+    acc["country_code"], acc["education"], acc["language_profile"] = country_code, profile["education"], profile
+    with state_lock:
+        state.setdefault("accounts", {}).setdefault(acc["nickname"], {}).update(
+            {"country_code": country_code, "education": profile["education"], "language_profile": profile})
+    mark_state_dirty()
+    return profile
+
+
+def choose_comment_language(acc: dict, post_language: str) -> str | None:
+    profile = acc.get("language_profile", {})
+    native = profile.get("native", acc.get("lang_code", "zh"))
+    ability = float(profile.get("languages", {}).get(post_language, 0) or 0)
+    if post_language in ("unknown", native): return native
+    if post_language == "en" and ability >= .35: return "en"
+    if post_language == "en" and ability >= .20 and random.random() < ability: return "en"
+    return post_language if ability >= .25 else None
 
 
 def detect_lang(text: str) -> str:
@@ -878,6 +921,8 @@ def gen_persona(idx: int, used_nicks: list, state: dict) -> dict | None:
         except Exception:
             if 2 <= len(raw.strip()) <= 60: bio = raw.strip()[:50]; personality = "随性"; break
     if not bio: bio, personality = f"{nat['prompt_lang']} user", "普通"
+    education = random.choices(list(EDUCATION_ENGLISH_BASE), weights=[8, 18, 30, 28, 10, 3, 3], k=1)[0]
+    language_profile = build_language_profile(nat["country_code"], nat["lang_code"], education, occupation, income)
 
     avatar_desc = ""
     for _ in range(3):
@@ -887,8 +932,9 @@ def gen_persona(idx: int, used_nicks: list, state: dict) -> dict | None:
         if re.fullmatch(r"[a-z0-9 ,\-]{2,60}", raw.strip()): avatar_desc = raw.strip(); break
 
     return {"nickname": nick, "bio": bio, "avatar_desc": avatar_desc, "nationality": nat["country"],
-            "language": nat["language"], "lang_code": nat["lang_code"], "prompt_lang": nat["prompt_lang"],
+            "country_code": nat["country_code"], "language": nat["language"], "lang_code": nat["lang_code"], "prompt_lang": nat["prompt_lang"],
             "personality": personality, "occupation": occupation, "income": income,
+            "education": education, "language_profile": language_profile,
             "interests": random.sample(list(INTEREST_KEYWORDS), k=random.randint(2, 4)),
             "llm_provider": provider_name, "social_anxiety": random.uniform(.1, .8), "fear_of_judgment": .2}
 
@@ -1017,24 +1063,38 @@ def remember_life_event(acc: dict, state: dict, event: dict) -> None:
 
 def curate_images_for_event(acc: dict, image_paths: list, event: dict, content: str, max_images: int = 3) -> list:
     """视觉模型只负责挑选和既定事件相符的照片，不能重写文案。"""
+    # ️ 修复：VLM 接口通常有图片数量限制（如最多4张），先进行本地随机抽样
+    vlm_candidates = image_paths
+    if len(image_paths) > 4:
+        vlm_candidates = random.sample(image_paths, 4)
+
     items = []
-    for index, path in enumerate(image_paths):
+    for index, path in enumerate(vlm_candidates):
         try:
-            with open(path, "rb") as f: data = f.read()
+            with open(path, "rb") as f:
+                data = f.read()
             items.append((base64.b64encode(data).decode(), image_content_type(path), index))
-        except OSError: continue
+        except OSError:
+            continue
+
     if not items: return []
+
     prompt = (f"从手机相册为动态选图。事件：{event['description']}。动态：{content}\n"
               f"候选图片编号 0 到 {len(items) - 1}。选择 0~{min(max_images, len(items))} 张最自然匹配的图片；"
               "不匹配就不要选，绝不为了带图强选。严格只返回 JSON：{\"selected_indices\":[0,1]}。")
+
     raw = llm_vision_generate([(b64, ctype) for b64, ctype, _ in items], prompt,
                               acc.get("llm_provider") or get_default_provider_name(), max_tokens=120)
     try:
         indices = json.loads(_clean_llm_text(raw or "{}")).get("selected_indices", [])
         indices = [index for index in indices if isinstance(index, int) and 0 <= index < len(items)]
-        original_indices = [items[index][2] for index in list(dict.fromkeys(indices))[:max_images]]
-        return [image_paths[index] for index in original_indices]
-    except (ValueError, TypeError, json.JSONDecodeError): return []
+        # 将 VLM 选中的抽样索引，映射回原始 image_paths 的真实索引
+        original_indices = [vlm_candidates[index] for index in list(dict.fromkeys(indices))[:max_images]]
+        # 找到这些图片在原始列表中的路径
+        return [p for p in original_indices if p in image_paths]
+    except (ValueError, TypeError, json.JSONDecodeError):
+        # 🛠️ 如果 VLM 依然失败，降级为从原始列表中随机选 1 张，而不是放弃发图
+        return [random.choice(image_paths)] if image_paths else []
 
 
 def gen_text(kind: str, persona: dict, history: list | None = None, max_tokens: int = 200,
@@ -1448,9 +1508,10 @@ def prune_deleted_accounts(state: dict) -> int:
     return len(deleted)
 
 
-def _request_login(phone: str) -> dict | None:
+def _request_login(phone: str, country_code: str = "") -> dict | None:
     code = "".join(random.choices("0123456789", k=6))
-    response = http_json("POST", "/user/login", {"phone": phone, "code": code, "randomNum": code})
+    response = http_json("POST", "/user/login", {"phone": phone, "code": code, "randomNum": code,
+                                                     "country": country_code})
     data = (response or {}).get("data")
     return data if isinstance(data, dict) else None
 
@@ -1479,22 +1540,29 @@ def rotate_account_tokens(state: dict) -> tuple[int, int]:
     return rotated, failed
 
 
-def login_agent(state: dict, nickname: str, dry_run: bool):
+def phone_for_country(country_code: str) -> str:
+    prefix = {"CN": "+86", "US": "+1", "JP": "+81", "KR": "+82", "FR": "+33", "DE": "+49",
+              "ES": "+34", "RU": "+7"}.get(country_code, "+86")
+    return prefix + "".join(random.choices("0123456789", k=10))
+
+
+def login_agent(state: dict, nickname: str, dry_run: bool, seed_profile: dict | None = None):
     account = state["accounts"].get(nickname)
     if account and account.get("token"):
         if dry_run or _verify_token(account["account"], account["token"]): return account
     phone = account.get("phone") if isinstance(account, dict) else None
     if account and not phone: return None
-    phone = phone or "199" + "".join(random.choices("0123456789", k=8))
+    country_code = (account or {}).get("country_code") or (seed_profile or {}).get("country_code", "CN")
+    phone = phone or phone_for_country(country_code)
     if dry_run: return {"phone": phone, "account": "DRY-" + uuid.uuid4().hex[:8], "token": "dry-token",
                         "nickname": nickname}
-    data = _request_login(phone) or {}
+    data = _request_login(phone, country_code) or {}
     token = data.get("token");
     user = data.get("user") or {}
     if not token: return None
     if account and user.get("account") != account.get("account"): return None
     acc = {"phone": phone, "account": user.get("account"), "token": token, "token_issued_at": int(time.time()),
-           "nickname": nickname}
+           "nickname": nickname, "country_code": country_code}
     with state_lock:
         state["accounts"][nickname] = acc
     mark_state_dirty()
@@ -1513,7 +1581,9 @@ def setup_profile(acc: dict, persona: dict, state: dict, dry_run: bool, try_remo
 
     def put_profile(av):
         payload = {"account": user["account"], "name": nickname, "sign": persona["bio"], "phone": user.get("phone"),
-                   "avatar": av}
+                   "avatar": av, "country": acc.get("country_code"),
+                   "nativeLanguage": acc.get("language_profile", {}).get("native", acc.get("lang_code")),
+                   "englishLevel": acc.get("language_profile", {}).get("english_level")}
         return bool(http_json("PUT", "/user", payload, token=acc["token"], raise_on_error=True))
 
     avatar_url = user.get("avatar")
@@ -1897,7 +1967,8 @@ def check_and_reply_interactions(acc: dict, state: dict, dry_run: bool):
 
 def create_post(acc: dict, text: str, dry_run: bool):
     if dry_run: return "dry-post-id"
-    r = http_json("POST", "/posts/post", {"account": acc["account"], "text": text}, token=acc["token"])
+    r = http_json("POST", "/posts/post", {"account": acc["account"], "text": text,
+                                               "language": acc.get("active_post_language", acc.get("lang_code", "unknown"))}, token=acc["token"])
     if r and r.get("code") == 1: return r.get("data")
     return None
 
@@ -2128,7 +2199,8 @@ def publish_event_driven_post(acc: dict, state: dict, tier: str, max_imgs: int, 
     batch_size = 0
     wants_image = False
     if ENABLE_EXTERNAL_POST_IMAGES:
-        base_image_probability = EVENT_IMAGE_PROBABILITY.get(intent["post_type"], .05)
+        # 👇 增加 0.1 (10%) 的基础带图概率，让所有类型的帖子都有更高几率配图
+        base_image_probability = EVENT_IMAGE_PROBABILITY.get(intent["post_type"], .05)+0.15
         account_state = state.get("accounts", {}).get(acc["nickname"], {})
         past_image_posts = int(account_state.get("image_post_count", 0) or 0)
         if past_image_posts > 0:
@@ -2220,6 +2292,7 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
                 log_action(acc, "PROFILE_PENDING", details="Name saved; avatar upload pending", level="WARNING")
                 return
         ensure_social_psychology(acc, state)
+        ensure_language_profile(acc, state)
         update_account_reputation(acc, state)
         post_prob, tier, max_imgs, llm_tokens = get_post_probability_and_tier(acc)
         mental_state = calculate_mental_state(acc, acc.get("reputation_score", 0))
@@ -2312,15 +2385,20 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
 
             reply_driving = calculate_reply_driving_force(ptext, "", acc, state, pauthor)
             reply_fear = calculate_reply_fear_resistance(pauthor, False, acc, state)
+            post_language = str(post.get("language") or detect_lang(ptext))
+            comment_language = choose_comment_language(acc, post_language)
             if reply_driving > reply_fear:
                 adjusted_comment_probability = min(.85, comment_probability + (reply_driving - reply_fear) * .5)
             else:
                 adjusted_comment_probability = 0.0
                 print(f"🙇 [{nick}] 想评论 {author_name} 的帖子，但害怕说错话，默默划走。"
                       f" (推动:{reply_driving:.2f} < 阻力:{reply_fear:.2f})")
+            if comment_language is None:
+                adjusted_comment_probability = 0.0
             if random.random() < adjusted_comment_probability:
                 stance = choose_interaction_stance(state, acc["account"], pauthor, author_name)
-                c = gen_text("comment", {**acc, "target": ptext, "interaction_stance": stance,
+                c = gen_text("comment", {**acc, "prompt_lang": LANGUAGE_PROMPT_NAMES.get(comment_language, acc.get("prompt_lang", "English")),
+                                         "target": ptext, "interaction_stance": stance,
                                          "relationship_context": relationship_context(state, acc["account"], pauthor,
                                                                                       author_name)},
                              mental_state=mental_state)
@@ -2493,7 +2571,11 @@ def prepare_accounts_worker(args, state):
                 acc["interests"] = cached.get("interests", []);
                 acc["occupation"] = cached.get("occupation", "普通职员")
                 acc["income"] = cached.get("income", "中");
+                acc["country_code"] = cached.get("country_code", "")
+                acc["education"] = cached.get("education", "high_school")
+                acc["language_profile"] = cached.get("language_profile", {})
                 acc["llm_provider"] = cached.get("llm_provider") or get_default_provider_name()
+                ensure_language_profile(acc, state)
                 ensure_agent_interests(acc, state);
                 mark_account_ready(nick)
                 print(f"✅ [工厂] [{idx}/{len(reuse)}] {nick} 已登录，可立即调度")
@@ -2509,13 +2591,14 @@ def prepare_accounts_worker(args, state):
             if not persona: factory_stop_event.wait(60); continue
             if persona["nickname"] in state.get("accounts", {}): factory_stop_event.wait(1); continue
             state.setdefault("personas", {})[persona["nickname"]] = persona["bio"]
-            acc = login_agent(state, persona["nickname"], args.dry_run)
+            acc = login_agent(state, persona["nickname"], args.dry_run, persona)
             if not acc: factory_stop_event.wait(5); continue
             acc["bio"] = persona["bio"]
             acc.update({key: persona.get(key) for key in
-                        ("personality", "nationality", "language", "lang_code", "prompt_lang", "interests",
-                         "occupation", "income")})
+                        ("personality", "nationality", "country_code", "language", "lang_code", "prompt_lang", "interests",
+                         "occupation", "income", "education", "language_profile")})
             acc["llm_provider"] = persona.get("llm_provider") or get_default_provider_name()
+            ensure_language_profile(acc, state)
             ensure_agent_interests(acc, state);
             mark_account_ready(persona["nickname"])
             print(f"✨ [工厂] 新账号 {persona['nickname']} 已登录，可立即调度")

@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS `user` (
     `avatar` VARCHAR(512) DEFAULT NULL,
     `sign` VARCHAR(500) DEFAULT NULL,
     `address` VARCHAR(255) DEFAULT NULL,
+    `country` VARCHAR(8) DEFAULT NULL,
+    `native_language` VARCHAR(16) DEFAULT NULL,
+    `english_level` DECIMAL(5,4) DEFAULT NULL,
     `update_time` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3),
     PRIMARY KEY (`account`),
     UNIQUE KEY `uk_user_phone` (`phone`)
@@ -21,6 +24,8 @@ CREATE TABLE IF NOT EXISTS `posts` (
     `text` TEXT,
     `view_count` BIGINT NOT NULL DEFAULT 0,
     `like_count` BIGINT NOT NULL DEFAULT 0 COMMENT '点赞数冗余字段',
+    `language` VARCHAR(16) NOT NULL DEFAULT 'unknown' COMMENT '正文主语言',
+    `author_country` VARCHAR(8) DEFAULT NULL COMMENT '作者发帖时的国家快照',
     `is_featured` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为精品贴 (0:否, 1:是)',
     `update_date` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (`id`),
@@ -29,7 +34,31 @@ CREATE TABLE IF NOT EXISTS `posts` (
 
 ALTER TABLE `posts` ADD COLUMN `view_count` BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE `posts` ADD COLUMN `like_count` BIGINT NOT NULL DEFAULT 0 COMMENT '点赞数冗余字段';
+ALTER TABLE `posts` ADD COLUMN `language` VARCHAR(16) NOT NULL DEFAULT 'unknown' COMMENT '正文主语言';
+ALTER TABLE `posts` ADD COLUMN `author_country` VARCHAR(8) DEFAULT NULL COMMENT '作者发帖时的国家快照';
 ALTER TABLE `posts` ADD COLUMN `is_featured` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为精品贴 (0:否, 1:是)';
+ALTER TABLE `user` ADD COLUMN `country` VARCHAR(8) DEFAULT NULL;
+ALTER TABLE `user` ADD COLUMN `native_language` VARCHAR(16) DEFAULT NULL;
+ALTER TABLE `user` ADD COLUMN `english_level` DECIMAL(5,4) DEFAULT NULL;
+CREATE INDEX `idx_posts_language` ON `posts` (`language`);
+
+-- 既有账号按号码前缀回填国家；历史大陆手机号（11 位、1 开头）归为 CN。
+UPDATE `user` SET `country` = CASE
+    WHEN `phone` LIKE '+86%' OR `phone` LIKE '86%' OR `phone` LIKE '1__________' THEN 'CN'
+    WHEN `phone` LIKE '+81%' OR `phone` LIKE '81%' THEN 'JP'
+    WHEN `phone` LIKE '+82%' OR `phone` LIKE '82%' THEN 'KR'
+    WHEN `phone` LIKE '+33%' OR `phone` LIKE '33%' THEN 'FR'
+    WHEN `phone` LIKE '+49%' OR `phone` LIKE '49%' THEN 'DE'
+    WHEN `phone` LIKE '+34%' OR `phone` LIKE '34%' THEN 'ES'
+    WHEN `phone` LIKE '+7%' OR `phone` LIKE '7%' THEN 'RU'
+    WHEN `phone` LIKE '+1%' THEN 'US' ELSE `country` END
+WHERE `country` IS NULL OR `country` = '';
+UPDATE `user` SET `native_language` = CASE `country`
+    WHEN 'CN' THEN 'zh' WHEN 'JP' THEN 'ja' WHEN 'KR' THEN 'ko' WHEN 'FR' THEN 'fr'
+    WHEN 'DE' THEN 'de' WHEN 'ES' THEN 'es' WHEN 'RU' THEN 'ru' ELSE 'en' END
+WHERE `native_language` IS NULL OR `native_language` = '';
+UPDATE `user` SET `english_level` = CASE WHEN `native_language` = 'en' THEN 1.0000 ELSE 0.1800 END
+WHERE `english_level` IS NULL;
 
 CREATE TABLE IF NOT EXISTS `post_dwell` (
     `id` VARCHAR(36) NOT NULL,

@@ -355,6 +355,9 @@ public class PostsController {
             @RequestParam(required = false) String excludeIds) {
         int safePage = Math.max(page, 1);
         int safeSize = Math.min(Math.max(size, 1), 50);
+        User requestingUser = userService.getUser(account);
+        String viewerNativeLanguage = resolveNativeLanguage(requestingUser);
+        double viewerEnglishLevel = resolveEnglishLevel(requestingUser, viewerNativeLanguage);
         Map<String, Integer> authorAffinity = new java.util.HashMap<>();
 
         LambdaQueryWrapper<Followers> followingQuery = new LambdaQueryWrapper<>();
@@ -428,7 +431,9 @@ public class PostsController {
                 for (Posts post : candidates) {
                     scoreDetails.put(post.getId(), recommendationScorer.score(
                             post, buildPostQuality(post), authorAffinity.getOrDefault(post.getAccount(), 0),
-                            authorFanCounts.getOrDefault(post.getAccount(), 0L), averageViews, averageLikes));
+                            authorFanCounts.getOrDefault(post.getAccount(), 0L), averageViews, averageLikes,
+                            viewerNativeLanguage, viewerEnglishLevel,
+                            resolvePostLanguage(post)));
                 }
                 candidates.sort((left, right) -> {
                     int scoreCompare = Double.compare(
@@ -507,6 +512,9 @@ public class PostsController {
         posts.setId(uuid.toString());
         posts.setText(text);
         posts.setLikeCount(0L);
+        posts.setLanguage(normalizeLanguage((String) map.get("language"), text));
+        User author = userService.getUser(account);
+        posts.setAuthorCountry(resolveCountry(author));
         posts.setUpdateDate(LocalDateTime.now());
 
         postsService.save(posts);
@@ -526,6 +534,8 @@ public class PostsController {
         posts.setId(uuid.toString());
         posts.setText("转发来自用户账号为@"+post.getAccount()+"的动态:"+post.getText());
         posts.setLikeCount(0L);
+        posts.setLanguage(resolvePostLanguage(post));
+        posts.setAuthorCountry(resolveCountry(userService.getUser(account)));
         posts.setUpdateDate(LocalDateTime.now());
         postsService.save(posts);
         for (Object o : list) {
@@ -577,6 +587,46 @@ public class PostsController {
         }
 
         return R.success(postsDtos);
+    }
+
+    private String resolvePostLanguage(Posts post) {
+        return normalizeLanguage(post.getLanguage(), post.getText());
+    }
+
+    private String normalizeLanguage(String supplied, String text) {
+        if (supplied != null && supplied.matches("^(zh|en|ja|ko|fr|de|es|ru|pt|it)$")) return supplied;
+        String value = text == null ? "" : text;
+        if (value.matches(".*[\\u4e00-\\u9fff].*")) return "zh";
+        if (value.matches(".*[\\u3040-\\u30ff].*")) return "ja";
+        if (value.matches(".*[\\uac00-\\ud7af].*")) return "ko";
+        if (value.matches(".*[\\u0400-\\u04ff].*")) return "ru";
+        return value.isBlank() ? "unknown" : "en";
+    }
+
+    private String resolveCountry(User user) {
+        if (user != null && user.getCountry() != null && !user.getCountry().isBlank()) return user.getCountry().toUpperCase();
+        String phone = user == null || user.getPhone() == null ? "" : user.getPhone().replaceAll("\\s", "");
+        if (phone.startsWith("+86") || phone.startsWith("86")) return "CN";
+        if (phone.startsWith("+81") || phone.startsWith("81")) return "JP";
+        if (phone.startsWith("+82") || phone.startsWith("82")) return "KR";
+        if (phone.startsWith("+33") || phone.startsWith("33")) return "FR";
+        if (phone.startsWith("+34") || phone.startsWith("34")) return "ES";
+        if (phone.startsWith("+7") || phone.startsWith("7")) return "RU";
+        return "US".equalsIgnoreCase(phone) || phone.startsWith("+1") ? "US" : "";
+    }
+
+    private String resolveNativeLanguage(User user) {
+        if (user != null && user.getNativeLanguage() != null && !user.getNativeLanguage().isBlank()) return user.getNativeLanguage();
+        return switch (resolveCountry(user)) {
+            case "CN" -> "zh"; case "JP" -> "ja"; case "KR" -> "ko"; case "FR" -> "fr";
+            case "DE" -> "de"; case "ES" -> "es"; case "RU" -> "ru"; default -> "en";
+        };
+    }
+
+    private double resolveEnglishLevel(User user, String nativeLanguage) {
+        if ("en".equalsIgnoreCase(nativeLanguage)) return 1.0;
+        if (user != null && user.getEnglishLevel() != null) return Math.max(0, Math.min(1, user.getEnglishLevel()));
+        return .18; // 未建画像的非英语用户：仅具备阅读简单英文的默认能力。
     }
 
     /**

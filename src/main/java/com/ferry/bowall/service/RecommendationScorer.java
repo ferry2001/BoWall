@@ -19,7 +19,8 @@ public class RecommendationScorer {
     }
 
     public RecommendationDetailDto score(Posts post, PostQualityDto quality, int authorAffinity, long authorFanCount,
-                                         double averageViews, double averageLikes) {
+                                         double averageViews, double averageLikes, String nativeLanguage,
+                                         double englishLevel, String postLanguage) {
         long views = quality.getViewCount() == null ? 0 : quality.getViewCount();
         double smoothing = Math.max(1, properties.getSmoothingViews());
         double dwell = smooth(normalizePercent(quality.getDwellScore()), views, 0.50, smoothing);
@@ -33,6 +34,9 @@ public class RecommendationScorer {
         double audience = saturatingSqrt(authorFanCount, 8.0);
         double heat = relativeSqrt(views, averageViews);
         double trafficPool = trafficPoolScore(views, post.getLikeCount(), averageViews, averageLikes);
+        double languageMatch = languageMatch(nativeLanguage, englishLevel, postLanguage);
+        double languageRisk = languageRisk(languageMatch);
+        double crossLanguageExploration = crossLanguageExploration(post.getId(), postLanguage, languageMatch, englishLevel);
         double exploration = deterministicExploration(post.getId());
 
         RecommendationProperties.Weights weights = properties.getWeights();
@@ -46,11 +50,14 @@ public class RecommendationScorer {
         double audienceContribution = audience * weights.getAuthorAudience();
         double heatContribution = heat * weights.getGlobalHeat();
         double trafficPoolContribution = trafficPool * weights.getTrafficPool();
+        double languageContribution = languageMatch * weights.getLanguageMatch();
+        double crossLanguageContribution = crossLanguageExploration * weights.getCrossLanguageExploration();
         double baseScore = dwellContribution + effectiveContribution + likeContribution + commentContribution
                 + lowSkipContribution + freshnessContribution + affinityContribution + audienceContribution + heatContribution
                 + trafficPoolContribution;
         double explorationBonus = exploration * properties.getExplorationWeight();
-        double total = clamp(baseScore + explorationBonus);
+        // 看不懂的内容整体降权；语言能力强或母语匹配的内容保留其质量和热度收益。
+        double total = clamp(baseScore * languageRisk + languageContribution + crossLanguageContribution + explorationBonus);
 
         RecommendationDetailDto detail = new RecommendationDetailDto();
         detail.setMode("quality");
@@ -65,6 +72,9 @@ public class RecommendationScorer {
         detail.getComponents().put("authorAudience", round(audience));
         detail.getComponents().put("globalHeat", round(heat));
         detail.getComponents().put("trafficPool", round(trafficPool));
+        detail.getComponents().put("languageMatch", round(languageMatch));
+        detail.getComponents().put("languageRisk", round(languageRisk));
+        detail.getComponents().put("crossLanguageExploration", round(crossLanguageExploration));
         detail.getComponents().put("exploration", round(exploration));
         detail.getComponents().put("weightedDwellQuality", round(dwellContribution));
         detail.getComponents().put("weightedEffectiveRead", round(effectiveContribution));
@@ -76,6 +86,8 @@ public class RecommendationScorer {
         detail.getComponents().put("weightedAuthorAudience", round(audienceContribution));
         detail.getComponents().put("weightedGlobalHeat", round(heatContribution));
         detail.getComponents().put("weightedTrafficPool", round(trafficPoolContribution));
+        detail.getComponents().put("weightedLanguageMatch", round(languageContribution));
+        detail.getComponents().put("weightedCrossLanguageExploration", round(crossLanguageContribution));
         detail.getComponents().put("baseScore", round(baseScore));
         detail.getComponents().put("explorationBonus", round(explorationBonus));
         return detail;
@@ -140,6 +152,26 @@ public class RecommendationScorer {
 
     private long bounded(long value, long min, long max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private double languageMatch(String nativeLanguage, double englishLevel, String postLanguage) {
+        if (postLanguage == null || postLanguage.isBlank() || "unknown".equalsIgnoreCase(postLanguage)) return .5;
+        if (nativeLanguage != null && nativeLanguage.equalsIgnoreCase(postLanguage)) return 1.0;
+        if ("en".equalsIgnoreCase(postLanguage)) return clamp(englishLevel * .65);
+        return .03; // 没有明确能力证据时，小语种只保留极低的探索机会。
+    }
+
+    private double languageRisk(double languageMatch) {
+        if (languageMatch >= .8) return 1.0;
+        if (languageMatch >= .5) return .75;
+        if (languageMatch >= .25) return .45;
+        return .15;
+    }
+
+    private double crossLanguageExploration(String postId, String postLanguage, double languageMatch, double englishLevel) {
+        if (languageMatch >= .95) return 0;
+        double budget = "en".equalsIgnoreCase(postLanguage) ? .12 + englishLevel * .08 : .03;
+        return clamp(deterministicExploration(postId + ":lang:" + postLanguage) * budget * (1 - languageMatch));
     }
 
     private double clamp(double value) {

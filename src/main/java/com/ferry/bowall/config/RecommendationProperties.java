@@ -17,15 +17,17 @@ public class RecommendationProperties {
 
     @Data
     public static class Weights {
-        private double dwellQuality = 0.21;
-        private double effectiveRead = 0.14;
-        private double likeRate = 0.10;
-        private double commentRate = 0.08;
-        private double lowSkipRate = 0.08;
-        private double freshness = 0.11;
-        private double authorAffinity = 0.05;
-        private double authorAudience = 0.05;
-        private double globalHeat = 0.07;
-        private double trafficPool = 0.11;
+        private double dwellQuality = 0.17;
+        private double effectiveRead = 0.11;
+        private double likeRate = 0.08;
+        private double commentRate = 0.06;
+        private double lowSkipRate = 0.07;
+        private double freshness = 0.09;
+        private double authorAffinity = 0.04;
+        private double authorAudience = 0.04;
+        private double globalHeat = 0.05;
+        private double trafficPool = 0.07;
+        private double languageMatch = 0.18;
+        private double crossLanguageExploration = 0.04;
     }
 }

@@ -10,7 +10,9 @@
     </select>
 
     <update id="updateUser" parameterType="com.ferry.bowall.entity.User">
-        UPDATE user set name = #{name},account = #{account},sign = #{sign},phone = #{phone},avatar = #{avatar} where account = #{account}
+        UPDATE user set name = #{name},account = #{account},sign = #{sign},phone = #{phone},avatar = #{avatar},
+        country = COALESCE(#{country}, country),native_language = COALESCE(#{nativeLanguage}, native_language),
+        english_level = COALESCE(#{englishLevel}, english_level) where account = #{account}
     </update>
 
     <select id="friends" resultType="com.ferry.bowall.entity.User">

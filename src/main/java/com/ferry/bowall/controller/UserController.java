@@ -25,6 +25,7 @@ import java.nio.file.StandardCopyOption;
 import jakarta.servlet.http.HttpServletRequest;
 import java.time.LocalDateTime;
 import java.util.*;
+import java.util.concurrent.ThreadLocalRandom;
 import javax.imageio.ImageIO;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
@@ -111,7 +112,9 @@ public class UserController {
         log.info(map.toString());
 
         //获取手机号
-        String phone = map.get("phone").toString();
+        String requestedCountry = normalizeCountry(String.valueOf(map.getOrDefault("country", "")));
+        String phone = String.valueOf(map.getOrDefault("phone", "")).trim();
+        if (phone.isBlank()) phone = generatePhoneForCountry(requestedCountry);
 
         //获取验证码
         String code = map.get("code").toString();
@@ -138,7 +141,12 @@ public class UserController {
                 user.setAccount(UUID.randomUUID().toString());
                 user.setPhone(phone);
                 user.setStatus(1);
+                applyLanguageDefaults(user, requestedCountry);
                 userService.save(user);
+            } else if (user.getCountry() == null || user.getNativeLanguage() == null || user.getEnglishLevel() == null) {
+                // 历史账号在下次登录时也会补齐画像；不需要客户端重注册。
+                applyLanguageDefaults(user, requestedCountry);
+                userService.updateUser(user);
             }
             Map<String, Object> loginResult = new HashMap<>();
             loginResult.put("token", jwtService.createToken(user.getAccount()));
@@ -146,6 +154,49 @@ public class UserController {
             return R.success(loginResult);
         }
         return R.error("登录失败");
+    }
+
+    private void applyLanguageDefaults(User user, String requestedCountry) {
+        String country = !requestedCountry.isBlank() ? requestedCountry : inferCountryFromPhone(user.getPhone());
+        if (country.isBlank()) country = "CN";
+        user.setCountry(country);
+        String nativeLanguage = switch (country) {
+            case "CN" -> "zh"; case "JP" -> "ja"; case "KR" -> "ko"; case "FR" -> "fr";
+            case "DE" -> "de"; case "ES" -> "es"; case "RU" -> "ru"; default -> "en";
+        };
+        user.setNativeLanguage(nativeLanguage);
+        user.setEnglishLevel("en".equals(nativeLanguage) ? 1.0 : .18);
+    }
+
+    private String normalizeCountry(String country) {
+        if (country == null) return "";
+        return switch (country.trim().toUpperCase(Locale.ROOT)) {
+            case "CN", "US", "JP", "KR", "FR", "DE", "ES", "RU" -> country.trim().toUpperCase(Locale.ROOT);
+            default -> "";
+        };
+    }
+
+    private String inferCountryFromPhone(String phone) {
+        String value = phone == null ? "" : phone.replaceAll("\\s", "");
+        if (value.startsWith("+86") || value.startsWith("86") || value.matches("1\\d{10}")) return "CN";
+        if (value.startsWith("+81") || value.startsWith("81")) return "JP";
+        if (value.startsWith("+82") || value.startsWith("82")) return "KR";
+        if (value.startsWith("+33") || value.startsWith("33")) return "FR";
+        if (value.startsWith("+49") || value.startsWith("49")) return "DE";
+        if (value.startsWith("+34") || value.startsWith("34")) return "ES";
+        if (value.startsWith("+7") || value.startsWith("7")) return "RU";
+        return value.startsWith("+1") || value.startsWith("1") ? "US" : "";
+    }
+
+    private String generatePhoneForCountry(String country) {
+        String prefix = switch (country) {
+            case "JP" -> "+81"; case "KR" -> "+82"; case "FR" -> "+33"; case "DE" -> "+49";
+            case "ES" -> "+34"; case "RU" -> "+7"; case "US" -> "+1"; default -> "+86";
+        };
+        int digits = "US".equals(country) ? 10 : "RU".equals(country) ? 10 : 10;
+        StringBuilder phone = new StringBuilder(prefix);
+        for (int index = 0; index < digits; index++) phone.append(ThreadLocalRandom.current().nextInt(10));
+        return phone.toString();
     }
 
 
