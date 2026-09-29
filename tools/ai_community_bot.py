@@ -1092,9 +1092,18 @@ def fetch_post_history(acc: dict, limit: int = 8) -> list:
     return [p.get("text", "") for p in posts if isinstance(p, dict) and p.get("text")][-limit:]
 
 
-def fetch_latest_posts(acc: dict, limit: int = 15) -> list:
-    r = http_json("GET", "/posts/getAllPosts", params={"page": 1, "size": limit, "account": acc["account"]},
-                  token=acc["token"])
+MAX_SEEN_POST_IDS = 500
+# UUID 帖子 ID 放在 GET 查询参数中；150 条约 5.5KB，可避开常见服务器的 URL 长度限制。
+MAX_EXCLUDED_POST_IDS_PER_REQUEST = 150
+
+
+def fetch_latest_posts(acc: dict, limit: int = 15, exclude_ids: list | None = None) -> list:
+    params = {"page": 1, "size": limit, "account": acc["account"]}
+    if exclude_ids:
+        # 状态保留 500 条，但单次 GET 只传最近 150 条，避免 URL 过长。
+        params["excludeIds"] = ",".join(
+            str(post_id) for post_id in exclude_ids[-MAX_EXCLUDED_POST_IDS_PER_REQUEST:] if post_id)
+    r = http_json("GET", "/posts/getAllPosts", params=params, token=acc["token"])
     data = (r or {}).get("data")
     return data if isinstance(data, list) else []
 
@@ -1147,6 +1156,10 @@ def local_interest_score(acc: dict, state: dict, post: dict, following: set) -> 
     familiarity = float(relation.get("familiarity", 0) or 0)
     score += affinity * 0.20 + familiarity * 0.16
     if author in following: score += 0.12
+    if int(post.get("isFeatured") or post.get("is_featured") or 0): score += 0.28
+    like_count = int(post.get("likeCount") or post.get("like_count") or 0)
+    comment_count = int(post.get("commentCount") or post.get("comment_count") or 0)
+    if like_count > 5 or comment_count > 3: score += 0.30
     personality = str(acc.get("personality") or "")
     score += sum(bias for trait, bias in PERSONALITY_DWELL_BIAS.items() if trait in personality) * 0.25
     return max(0.02, min(0.98, score))
@@ -1186,6 +1199,27 @@ def weighted_sample_without_replacement(items: list, weights: list, count: int) 
 # ---------------------------------------------------------------------------
 # 🌟 头像：从真实网络图库抓取 (Reddit / Picsum)
 # ---------------------------------------------------------------------------
+DEFAULT_AVATAR_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                   "src", "main", "resources", "static", "assets", "me", "head-list.png")
+AVATAR_RETRY_PROBABILITY = .20
+
+
+def upload_avatar(acc: dict, data: bytes, filename: str, content_type: str) -> str | None:
+    response = http_multipart("POST", "/user/avatar", fields={"account": acc["account"]}, file_field="avatar",
+                              filename=filename, file_bytes=data, content_type=content_type, token=acc["token"])
+    payload = (response or {}).get("data")
+    return payload.get("avatar") if isinstance(payload, dict) and payload.get("avatar") else None
+
+
+def upload_default_avatar(acc: dict) -> str | None:
+    try:
+        with open(DEFAULT_AVATAR_PATH, "rb") as avatar_file:
+            return upload_avatar(acc, avatar_file.read(), "default-avatar.png", "image/png")
+    except OSError as error:
+        print(f"⚠️ [{acc['nickname']}] 默认头像不可用: {error}")
+        return None
+
+
 def fetch_avatar(nickname: str, keywords: str, state: dict):
     with state_lock:
         used = set(state.setdefault("used_avatar_urls", []))
@@ -1350,8 +1384,8 @@ def choose_interaction_stance(state: dict, source: str, target: str, target_name
 
 def record_relationship(state: dict, source: str, target: str, target_name: str, event: str, stance: str = "neutral",
                         topic: str = "") -> None:
-    # 🛠️ 提高单次互动的好感度收益，让关系更容易升温
-    effects = {"like": (0.06, 0.08), "comment": (0.15, 0.20), "reply": (0.20, 0.25), "dm": (0.30, 0.35)}
+    effects = {"like": (.02, .03), "comment": (.04, .06), "reply": (.06, .08),
+               "dm_sent": (.01, .02), "dm_reply": (.08, .12)}
     affinity_delta, familiarity_delta = effects.get(event, (0.02, 0.03))
     if stance == "gentle_disagree":
         affinity_delta = -0.06 if event == "comment" else -0.025
@@ -1366,18 +1400,19 @@ def record_relationship(state: dict, source: str, target: str, target_name: str,
         outgoing["positive_interactions"] = int(outgoing["positive_interactions"]) + (stance != "gentle_disagree")
         outgoing["disagreements"] = int(outgoing["disagreements"]) + (stance == "gentle_disagree")
         outgoing["last_event"] = {"like": "点赞了对方的动态", "comment": "评论了对方的动态",
-                                  "reply": "回复了对方的评论", "dm": "发送了私信"}.get(event, "产生了互动")
+                                  "reply": "回复了对方的评论", "dm_sent": "发送了私信", "dm_reply": "回复了私信"}.get(event, "产生了互动")
         outgoing["last_topic"] = topic[:80]
         outgoing["updated_at"] = int(time.time())
         incoming = _ensure_relation(state, target, source, reverse_name)
-        incoming_delta = affinity_delta * (0.7 if stance != "gentle_disagree" else 0.5)
+        incoming_delta = 0.0 if event == "dm_sent" else affinity_delta * (0.7 if stance != "gentle_disagree" else 0.5)
         incoming["affinity"] = round(max(-1, min(1, float(incoming["affinity"]) + incoming_delta)), 3)
-        incoming["familiarity"] = round(max(0, min(1, float(incoming["familiarity"]) + familiarity_delta * 0.75)), 3)
+        incoming_familiarity_delta = 0.0 if event == "dm_sent" else familiarity_delta * .75
+        incoming["familiarity"] = round(max(0, min(1, float(incoming["familiarity"]) + incoming_familiarity_delta)), 3)
         incoming["interactions"] = int(incoming["interactions"]) + 1
         incoming["positive_interactions"] = int(incoming["positive_interactions"]) + (stance != "gentle_disagree")
         incoming["disagreements"] = int(incoming["disagreements"]) + (stance == "gentle_disagree")
         incoming["last_event"] = {"like": "对方点赞了我的动态", "comment": "对方评论了我的动态",
-                                  "reply": "对方回复了我的评论", "dm": "对方发来了私信"}.get(event, "对方与我互动")
+                                  "reply": "对方回复了我的评论", "dm_sent": "对方发来了私信", "dm_reply": "对方回复了私信"}.get(event, "对方与我互动")
         incoming["last_topic"] = topic[:80]
         incoming["updated_at"] = int(time.time())
         for acc_id in (source, target):
@@ -1466,7 +1501,7 @@ def login_agent(state: dict, nickname: str, dry_run: bool):
     return acc
 
 
-def setup_profile(acc: dict, persona: dict, state: dict, dry_run: bool) -> bool:
+def setup_profile(acc: dict, persona: dict, state: dict, dry_run: bool, try_remote_avatar: bool = True) -> bool:
     nick = acc["nickname"]
     if dry_run: return True
     r = http_json("GET", "/user/getUser", params={"account": acc["account"]}, token=acc["token"])
@@ -1483,28 +1518,29 @@ def setup_profile(acc: dict, persona: dict, state: dict, dry_run: bool) -> bool:
 
     avatar_url = user.get("avatar")
     if not avatar_url:
-        img = fetch_avatar(persona["nickname"], persona.get("avatar_desc", ""), state)
-        if not img: return False
-        data, fname, ctype = img
-        up = http_multipart("POST", "/user/avatar", fields={"account": acc["account"]}, file_field="avatar",
-                            filename=fname, file_bytes=data, content_type=ctype, token=acc["token"])
-        avatar_data = (up or {}).get("data");
-        new_avatar = avatar_data.get("avatar") if isinstance(avatar_data, dict) else None
-        if not new_avatar: return False
-        avatar_url = new_avatar
-        with state_lock:
-            state.setdefault("avatars", {})[persona["nickname"]] = new_avatar
-        mark_state_dirty()
+        img = fetch_avatar(persona["nickname"], persona.get("avatar_desc", ""), state) if try_remote_avatar else None
+        if img:
+            data, fname, ctype = img
+            avatar_url = upload_avatar(acc, data, fname, ctype)
+        if not avatar_url:
+            avatar_url = upload_default_avatar(acc)
     try:
-        if not put_profile(avatar_url): return False
+        if not put_profile(avatar_url): return False  # 昵称优先：头像失败也必须保存资料。
     except ApiError:
         return False
     check = http_json("GET", "/user/getUser", params={"account": acc["account"]}, token=acc["token"])
     _g = (check or {}).get("data");
     got = _g if isinstance(_g, dict) else {}
     if got.get("name") != nickname: return False
+    with state_lock:
+        account_state = state.setdefault("accounts", {}).setdefault(nick, {})
+        account_state["profile_name_done"] = True
+        account_state["avatar_pending"] = not bool(got.get("avatar"))
+    if got.get("avatar"):
+        with state_lock: state.setdefault("avatars", {})[persona["nickname"]] = got["avatar"]
+    mark_state_dirty()
     log_action(acc, "PROFILE_SETUP", details=f"Name:{nickname}, Avatar:{bool(got.get('avatar'))}")
-    return True
+    return bool(got.get("avatar"))
 
 
 # ---------------------------------------------------------------------------
@@ -1528,7 +1564,88 @@ def send_dm(my_acc: str, target_acc: str, content: str, token: str) -> bool:
     return bool(r) and r.get("code") == 1
 
 
-def generate_dm_text(persona: dict, target_name: str, history: list, affinity: float) -> str:
+DM_EVENT_BASE_PROBABILITY = {"continue_public_interaction": .20, "share_life": .12,
+                             "ask_private_question": .18, "check_in": .05, "reply_received": .90}
+
+
+def build_dm_session_context(acc: dict, state: dict, viewed_posts: list) -> dict:
+    return {"viewed_accounts": {str(post.get("account")) for post in viewed_posts if post.get("account")},
+            "interacted_accounts": set(), "recent_events": get_recent_life_context_for_reply(acc, state, max_events=4)}
+
+
+def generate_dm_event(acc: dict, state: dict, session_ctx: dict) -> dict | None:
+    """本地决定本次会话是否有值得私聊的原因；无事件即不发。"""
+    events = session_ctx.get("recent_events", [])
+    if events and random.random() < .08:
+        event = events[-1]
+        return {"type": "share_life", "topic": event.get("description", "今天发生的一件事"),
+                "mood": event.get("mood", "normal"), "source": "life_event"}
+    if session_ctx.get("interacted_accounts") and random.random() < .12:
+        return {"type": "continue_public_interaction", "topic": "刚才聊到的话题", "mood": "engaged", "source": "public_interaction"}
+    if random.random() < .025:
+        return {"type": "check_in", "topic": "想起很久没聊的人", "mood": "neutral", "source": "relationship_memory"}
+    return None
+
+
+def choose_dm_recipient(acc: dict, state: dict, dm_event: dict, session_ctx: dict) -> dict | None:
+    relations = state.get("relationships", {}).get(acc["account"], {})
+    candidates = []
+    for target_acc, relation in relations.items():
+        if not target_acc or target_acc == acc["account"]: continue
+        affinity, familiarity = float(relation.get("affinity", 0) or 0), float(relation.get("familiarity", 0) or 0)
+        score = affinity * .40 + familiarity * .30 + min(int(relation.get("interactions", 0) or 0) / 20, 1) * .10
+        if dm_event["type"] == "share_life": score += familiarity * .30
+        if dm_event["type"] == "continue_public_interaction" and target_acc in session_ctx.get("interacted_accounts", set()): score += .60
+        if dm_event["type"] == "check_in": score += min((time.time() - float(relation.get("last_contact_at", 0) or 0)) / 86400 / 30, 1) * .40
+        candidates.append({"account": target_acc, "name": relation.get("name", "对方"), "relation": relation, "score": score})
+    if not candidates: return None
+    top = sorted(candidates, key=lambda item: item["score"], reverse=True)[:5]
+    return random.choices(top, weights=[max(.01, item["score"]) for item in top], k=1)[0]
+
+
+def calculate_dm_probability(acc: dict, relation: dict, dm_event: dict) -> float:
+    affinity, familiarity = float(relation.get("affinity", 0) or 0), float(relation.get("familiarity", 0) or 0)
+    probability = DM_EVENT_BASE_PROBABILITY.get(dm_event["type"], .03) * (.50 + affinity * .30 + familiarity * .40)
+    personality = str(acc.get("personality") or "")
+    if "热情" in personality: probability *= 1.25
+    if "话痨" in personality: probability *= 1.30
+    if "内向" in personality: probability *= .70
+    if "社恐" in personality: probability *= .55
+    return max(.01, min(.95, probability))
+
+
+def should_send_dm(acc: dict, state: dict, target_acc: str, relation: dict, dm_event: dict) -> tuple[bool, str]:
+    now = time.time()
+    with state_lock:
+        account_state = state.setdefault("accounts", {}).setdefault(acc["nickname"], {})
+        dm_state = account_state.setdefault("dm_state", {"last_outbound_dm_at": 0, "daily_outbound_count": 0,
+                                                           "daily_count_date": "", "recent_dm_events": []})
+    today = datetime.now().date().isoformat()
+    if dm_state.get("daily_count_date") != today:
+        dm_state["daily_count_date"], dm_state["daily_outbound_count"] = today, 0
+    if now - float(dm_state.get("last_outbound_dm_at", 0) or 0) < 1800: return False, "global_cooldown"
+    if dm_event["type"] != "reply_received" and now - float(relation.get("last_dm_at", 0) or 0) < 21600: return False, "recipient_cooldown"
+    if int(dm_state.get("daily_outbound_count", 0) or 0) >= 5: return False, "daily_limit"
+    if dm_event["type"] != "reply_received" and float(relation.get("affinity", 0) or 0) < .25 and float(relation.get("familiarity", 0) or 0) < .30:
+        return False, "relationship_too_weak"
+    return (True, "ok") if random.random() < calculate_dm_probability(acc, relation, dm_event) else (False, "probability")
+
+
+def record_dm_sent(acc: dict, state: dict, target_acc: str, dm_event: dict) -> None:
+    now, today = time.time(), datetime.now().date().isoformat()
+    with state_lock:
+        dm_state = state.setdefault("accounts", {}).setdefault(acc["nickname"], {}).setdefault("dm_state", {})
+        dm_state["last_outbound_dm_at"] = now
+        dm_state["daily_count_date"] = today
+        dm_state["daily_outbound_count"] = int(dm_state.get("daily_outbound_count", 0) or 0) + 1
+        dm_state["recent_dm_events"] = (dm_state.get("recent_dm_events", []) + [{"type": dm_event["type"], "at": now}])[-20:]
+        relation = _ensure_relation(state, acc["account"], target_acc, "对方")
+        relation.update({"last_dm_at": now, "last_dm_direction": "outbound", "last_dm_event_type": dm_event["type"],
+                         "dm_count": int(relation.get("dm_count", 0) or 0) + 1, "last_contact_at": now})
+    mark_state_dirty()
+
+
+def generate_dm_text(persona: dict, target_name: str, history: list, relation: dict, dm_event: dict) -> str:
     lang_req = f"必须严格使用 {persona['prompt_lang']} 语言。"
     history_text = "（暂无历史记录，这是你主动发起的搭讪）"
     if history:
@@ -1539,11 +1656,11 @@ def generate_dm_text(persona: dict, target_name: str, history: list, affinity: f
             lines.append(f"{sender_name}: {msg['content']}")
         history_text = "\n".join(lines)
     prompt = (
-        f"你正在社交软件上和 {target_name} 私信聊天。你们的好感度极高（{affinity:.2f}），有一种灵魂伴侣/相见恨晚的感觉。\n"
+        f"你正在社交软件上给 {target_name} 发私信。你们的关系：好感度 {float(relation.get('affinity', 0)):.2f}，熟悉度 {float(relation.get('familiarity', 0)):.2f}。\n"
+        f"这次私聊原因：{dm_event['type']}；具体事情：{dm_event.get('topic', '')}；当前情绪：{dm_event.get('mood', 'normal')}。\n"
         f"你的性格是：{persona.get('personality', '普通')}，人设：{persona.get('bio', '')}。\n{lang_req}\n"
         f"以下是你们的最近聊天记录：\n{history_text}\n\n"
-        f"请以极度口语化、像真人微信聊天的方式回复对方，或者主动开启一个新话题（分享今天的一件小事、表达一点思念或暧昧）。\n"
-        f"字数 10~60 字，可以带点 emoji，不要像写文章，只输出消息内容本身。")
+        f"请根据这件具体事情自然发消息，不要无缘无故暧昧或假装关系比实际亲密。口语化，10~60 字，只输出消息内容。")
     provider_name = persona.get("llm_provider") or get_default_provider_name()
     for _ in range(3):
         raw_out = llm_generate(prompt, provider_name, max_tokens=150)
@@ -1826,6 +1943,8 @@ def ensure_social_psychology(acc: dict, state: dict) -> None:
         fear = account_state.get("fear_of_judgment", acc.get("fear_of_judgment", .2))
         account_state["social_anxiety"] = round(float(anxiety), 3)
         account_state["fear_of_judgment"] = round(min(1.0, max(0.0, float(fear))), 3)
+        seen = account_state.get("seen_post_ids", [])
+        account_state["seen_post_ids"] = seen[-MAX_SEEN_POST_IDS:] if isinstance(seen, list) else []
     acc["social_anxiety"] = account_state["social_anxiety"]
     acc["fear_of_judgment"] = account_state["fear_of_judgment"]
 
@@ -2043,16 +2162,35 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
     try:
         if dry_run: return
         with state_lock:
-            needs_profile_setup = (not skip_profile_setup and not state["accounts"].get(nick, {}).get("profile_done"))
+            profile_state = state["accounts"].get(nick, {})
+            needs_profile_setup = not profile_state.get("profile_done")
+            profile_name_done = bool(profile_state.get("profile_name_done"))
+        # 已完成资料的账号也会低频检查头像是否仍存在，避免历史空头像永久遗漏。
+        if not needs_profile_setup and random.random() < AVATAR_RETRY_PROBABILITY:
+            current_user = http_json("GET", "/user/getUser", params={"account": acc["account"]}, token=acc["token"])
+            user_data = (current_user or {}).get("data")
+            if isinstance(user_data, dict) and not user_data.get("avatar"):
+                with state_lock:
+                    profile_state = state["accounts"].setdefault(nick, {})
+                    profile_state["profile_done"] = False
+                    profile_state["profile_name_done"] = True
+                    profile_state["avatar_pending"] = True
+                needs_profile_setup, profile_name_done = True, True
+                mark_state_dirty()
         if needs_profile_setup:
+            # 已保存昵称但暂时缺头像的账号随机重试，未完成前不参与社区活动。
+            if profile_name_done and random.random() >= AVATAR_RETRY_PROBABILITY:
+                log_action(acc, "PROFILE_PENDING", details="Avatar retry deferred")
+                return
             time.sleep(random.uniform(3.0, 15.0));
             throttle_avatar()
             persona = {"nickname": nick, "bio": acc.get("bio", ""), "avatar_desc": acc.get("avatar_desc", ""),
                        "llm_provider": acc.get("llm_provider") or get_default_provider_name()}
-            if setup_profile(acc, persona, state, False):
+            if setup_profile(acc, persona, state, False, try_remote_avatar=not skip_profile_setup):
                 interests = ensure_agent_interests(acc, state)
                 with state_lock:
                     state["accounts"][nick]["profile_done"] = True;
+                    state["accounts"][nick]["avatar_pending"] = False
                     state["accounts"][nick]["bio"] = acc.get("bio", "");
                     state["accounts"][nick]["avatar_desc"] = acc.get("avatar_desc", "")
                     state["accounts"][nick]["personality"] = acc.get("personality", "普通");
@@ -2063,6 +2201,9 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
                     state["accounts"][nick]["interests"] = interests
                     state["accounts"][nick]["llm_provider"] = acc.get("llm_provider") or get_default_provider_name()
                 mark_state_dirty()
+            else:
+                log_action(acc, "PROFILE_PENDING", details="Name saved; avatar upload pending", level="WARNING")
+                return
         ensure_social_psychology(acc, state)
         update_account_reputation(acc, state)
         post_prob, tier, max_imgs, llm_tokens = get_post_probability_and_tier(acc)
@@ -2075,7 +2216,9 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
             post_prob *= 1.5
         elif mental_state == "inferior":
             post_prob *= 0.5
-        posts = fetch_latest_posts(acc, limit=15)
+        with state_lock:
+            seen_post_ids = list(state["accounts"].get(nick, {}).get("seen_post_ids", []))[-MAX_SEEN_POST_IDS:]
+        posts = fetch_latest_posts(acc, limit=20, exclude_ids=seen_post_ids)
         if not posts: return
         with state_lock:
             acc_state = state["accounts"].get(nick, {}); already_following = set(acc_state.get("following", []))
@@ -2089,6 +2232,7 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
         browse_count = min(random.randint(3, 8), len(scored_posts))
         browse = weighted_sample_without_replacement([item[0] for item in scored_posts],
                                                      [item[1] for item in scored_posts], browse_count)
+        interacted_accounts = set()
         session_id = uuid.uuid4().hex
         for post in browse:
             pid = post.get("id");
@@ -2101,6 +2245,11 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
             view_probability = max(0.05, min(0.98, 0.12 + interest_score * 0.82 + random.uniform(-0.10, 0.10)))
             if random.random() > view_probability: continue
             if not report_post_view(acc, str(pid)): continue
+            if str(pid) not in seen_post_ids:
+                seen_post_ids.append(str(pid))
+                with state_lock:
+                    state["accounts"].setdefault(nick, {})["seen_post_ids"] = seen_post_ids[-MAX_SEEN_POST_IDS:]
+                mark_state_dirty()
             planned_dwell_seconds = choose_dwell_seconds(acc, post, interest_score)
             dwell_started_at = time.monotonic()
             time.sleep(planned_dwell_seconds * DWELL_TIME_SCALE)
@@ -2131,6 +2280,7 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
                 if like_post(acc, pid, False):
                     record_relationship(state, acc["account"], pauthor, author_name, "like", "supportive", ptext)
                     log_action(acc, "LIKE", target=str(pid), details=f"Author:{author_name}")
+                    interacted_accounts.add(pauthor)
                 time.sleep(random.uniform(0.5, 1.5))
 
             # 🌟 高兴趣直接关注机制（一见钟情）
@@ -2163,6 +2313,7 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
                 if comment_post(acc, pid, c, pauthor, False):
                     record_relationship(state, acc["account"], pauthor, author_name, "comment", stance, ptext)
                     log_action(acc, "COMMENT", target=str(pid), details=f"Author:{author_name}, Text:{c[:80]}")
+                    interacted_accounts.add(pauthor)
                     relation_after = state.get("relationships", {}).get(acc["account"], {}).get(pauthor, {})
                     if float(relation_after.get("familiarity", 0) or 0) > .3:
                         adjust_fear_of_judgment(acc, state, -.03)
@@ -2219,26 +2370,25 @@ def simulate_user_session(acc: dict, state: dict, dry_run: bool, skip_profile_se
             state["accounts"].setdefault(nick, {})["following"] = list(already_following)
         mark_state_dirty()
 
-        dm_sent_count = 0
-        for target_acc, relation in my_relations.items():
-            if not target_acc or target_acc == acc["account"]: continue
-            affinity = float(relation.get("affinity", 0));
-            target_name = relation.get("name", "对方")
-            if affinity >= 0.80:
-                with state_lock:
-                    last_dm = state["accounts"].get(nick, {}).get(f"last_dm_{target_acc}", 0)
-                if time.time() - last_dm > 600:
+        # Event-driven DM: 每个会话最多选择一位收件人并发送一条主动私信。
+        session_ctx = build_dm_session_context(acc, state, browse)
+        session_ctx["interacted_accounts"] = interacted_accounts
+        dm_event = generate_dm_event(acc, state, session_ctx)
+        if dm_event:
+            recipient = choose_dm_recipient(acc, state, dm_event, session_ctx)
+            if recipient:
+                target_acc, target_name, relation = recipient["account"], recipient["name"], recipient["relation"]
+                allowed, reason = should_send_dm(acc, state, target_acc, relation, dm_event)
+                if allowed and not dry_run:
                     history = fetch_dm_history(acc["account"], target_acc, acc["token"], limit=5)
-                    dm_text = generate_dm_text(acc, target_name, history, affinity)
-                    if not dry_run:
-                        if send_dm(acc["account"], target_acc, dm_text, acc["token"]):
-                            with state_lock: state["accounts"].setdefault(nick, {})[
-                                f"last_dm_{target_acc}"] = time.time()
-                            dm_sent_count += 1
-                            record_relationship(state, acc["account"], target_acc, target_name, "dm", "supportive",
-                                                dm_text)
-                            log_action(acc, "DM", target=target_acc, details=f"Recipient:{target_name}")
-        if dm_sent_count > 0: mark_state_dirty()
+                    dm_text = generate_dm_text(acc, target_name, history, relation, dm_event)
+                    if dm_text and send_dm(acc["account"], target_acc, dm_text, acc["token"]):
+                        record_dm_sent(acc, state, target_acc, dm_event)
+                        record_relationship(state, acc["account"], target_acc, target_name, "dm_sent", "neutral", dm_event.get("topic", ""))
+                        log_action(acc, "DM", target=target_acc,
+                                   details=f"Recipient:{target_name}, Event:{dm_event['type']}, Source:{dm_event['source']}")
+                elif not allowed:
+                    log_action(acc, "DM_SKIPPED", target=target_acc, details=f"Event:{dm_event['type']}, Reason:{reason}")
     finally:
         with _active_sessions_lock:
             _active_sessions_count -= 1; current_online = _active_sessions_count
@@ -2370,7 +2520,7 @@ def main() -> None:
     ap.add_argument("--like-chance", type=float, default=0.40)
     ap.add_argument("--comment-chance", type=float, default=0.15)
     ap.add_argument("--post-chance", type=float, default=0.10)
-    ap.add_argument("--no-avatar", action="store_true", help="跳过资料/头像设置")
+    ap.add_argument("--no-avatar", action="store_true", help="跳过网络头像抓取，仍设置昵称并上传默认头像")
     ap.add_argument("--interval", type=float, default=0.5, help="老号登录间隔")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划")
     ap.add_argument("--rotate-tokens", action="store_true", help="启动前重新签发所有账号令牌")

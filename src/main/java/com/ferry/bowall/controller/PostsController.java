@@ -254,10 +254,26 @@ public class PostsController {
     }
 
     @GetMapping("/getAllPosts")
-    public R<List<PostsDto>> getAllPosts(@RequestParam int page, @RequestParam int size, @RequestParam String account) {
+    public R<List<PostsDto>> getAllPosts(
+            @RequestParam int page,
+            @RequestParam int size,
+            @RequestParam String account,
+            @RequestParam(required = false) String excludeIds) {
         List<PostsDto> postsDtos = new ArrayList<>();
         LambdaQueryWrapper<Posts> postsLambdaQueryWrapper = new LambdaQueryWrapper<>();
-        postsLambdaQueryWrapper.orderByDesc(Posts::getUpdateDate);
+        // 精品优先；同一层级内仍按最新动态排序，保持旧客户端的时间线预期。
+        postsLambdaQueryWrapper.orderByDesc(Posts::getIsFeatured)
+                .orderByDesc(Posts::getUpdateDate);
+        // 浏览记录来自客户端，不信任其长度或空项，最多接收 500 个 ID。
+        if (excludeIds != null && !excludeIds.isBlank()) {
+            LinkedHashSet<String> excluded = new LinkedHashSet<>();
+            for (String candidate : excludeIds.split(",")) {
+                String postId = candidate.trim();
+                if (!postId.isEmpty()) excluded.add(postId);
+                if (excluded.size() >= 500) break;
+            }
+            if (!excluded.isEmpty()) postsLambdaQueryWrapper.notIn(Posts::getId, excluded);
+        }
 //        List<Posts> posts = postsService.list(postsLambdaQueryWrapper);
         Page<Posts> postsPage = new Page<>(page, size);
         postsPage = postsService.page(postsPage, postsLambdaQueryWrapper);
@@ -304,6 +320,7 @@ public class PostsController {
             postsDto.setId(post.getId());
             postsDto.setText(post.getText());
             postsDto.setViewCount(post.getViewCount());
+            postsDto.setIsFeatured(post.getIsFeatured());
             postsDto.setUpdateDate(post.getUpdateDate());
             postsDto.setImages(images);
             postsDto.setComments(commentsDtos);

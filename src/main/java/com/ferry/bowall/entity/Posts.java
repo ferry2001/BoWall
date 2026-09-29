@@ -10,5 +10,7 @@ public class Posts {
     private String account;
     private String text;
     private Long viewCount;
+    /** 0: ordinary post; 1: editor-selected featured post. */
+    private Integer isFeatured;
     private LocalDateTime updateDate;
 }

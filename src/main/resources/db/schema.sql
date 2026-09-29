@@ -20,12 +20,14 @@ CREATE TABLE IF NOT EXISTS `posts` (
     `account` VARCHAR(36) NOT NULL,
     `text` TEXT,
     `view_count` BIGINT NOT NULL DEFAULT 0,
+    `is_featured` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为精品贴 (0:否, 1:是)',
     `update_date` DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
     PRIMARY KEY (`id`),
     KEY `idx_posts_account_date` (`account`, `update_date` DESC)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 
 ALTER TABLE `posts` ADD COLUMN `view_count` BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE `posts` ADD COLUMN `is_featured` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否为精品贴 (0:否, 1:是)';
 
 CREATE TABLE IF NOT EXISTS `post_dwell` (
     `id` VARCHAR(36) NOT NULL,
